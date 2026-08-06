@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
@@ -20,6 +21,23 @@ class UrlValidationError(ValueError):
         super().__init__(message)
 
 
+class ScopeErrorCode(StrEnum):
+    ORIGIN_NOT_ALLOWED = "origin_not_allowed"
+
+
+class ScopeValidationError(ValueError):
+    def __init__(self, code: ScopeErrorCode, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class Origin:
+    scheme: str
+    host: str
+    port: int
+
+
 @dataclass(frozen=True, slots=True)
 class TargetUrl:
     scheme: str
@@ -28,6 +46,14 @@ class TargetUrl:
     path: str
     query: str
     url: str
+
+    @property
+    def origin(self) -> Origin:
+        return Origin(
+            scheme=self.scheme,
+            host=self.host,
+            port=self.port,
+        )
 
 
 _DEFAULT_PORTS = {
@@ -139,6 +165,17 @@ def parse_target_url(raw: str) -> TargetUrl:
         query=parsed.query,
         url=normalized_url,
     )
+
+
+def require_allowed_origin(
+    target: TargetUrl,
+    allowed_origins: Collection[Origin],
+) -> None:
+    if target.origin not in allowed_origins:
+        raise ScopeValidationError(
+            ScopeErrorCode.ORIGIN_NOT_ALLOWED,
+            "Target origin is not allowed.",
+        )
 
 
 def _normalize_host(host: str) -> str:

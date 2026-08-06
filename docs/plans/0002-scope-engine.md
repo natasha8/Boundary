@@ -13,7 +13,7 @@ network request occurs.
 
 ## Delivery slices
 
-### Slice A: Target URL parsing
+### Slice A: Target URL parsing — complete
 
 - accept absolute HTTP and HTTPS URLs;
 - reject unsupported schemes;
@@ -32,14 +32,27 @@ network request occurs.
   normalization;
 - remove fragments because they are not sent in HTTP requests.
 
-### Slice B: Origin allowlist
+### Slice B: Origin allowlist — complete
 
-- represent normalized origins;
-- allow exact configured origins;
-- reject scheme, host and port mismatches;
-- make subdomain inclusion explicit.
+- represent an immutable, hashable `Origin` value object (`scheme`, `host`,
+  `port`);
+- expose `TargetUrl.origin` returning that value object;
+- allow only exact configured origins via `require_allowed_origin`;
+- compare origins by scheme, normalized host and effective port only;
+- treat default ports as already normalized (`https://example.com` and
+  `https://example.com:443` are the same origin);
+- keep non-default ports distinct;
+- keep HTTP and HTTPS origins distinct;
+- support IPv4 and bracketed IPv6 origins;
+- reject every target when the allowlist is empty;
+- raise `ScopeValidationError` with `ScopeErrorCode.ORIGIN_NOT_ALLOWED`
+  for disallowed origins.
 
-### Slice C: Address policy
+Exact matching only: no wildcard matching, no suffix matching, and no
+implicit subdomain allowance. A host such as `api.example.com` is allowed
+only when that exact origin is configured.
+
+### Slice C: Address policy — in progress
 
 - classify IPv4 and IPv6 addresses;
 - reject special-use addresses by default;
@@ -77,3 +90,27 @@ Internationalized domains may be supplied later in their ASCII Punycode form.
 - empty ports and ambiguous hosts are rejected before network use;
 - tests cover HTTP, HTTPS, custom ports, localhost, IPv4, IPv6, Punycode,
   trailing DNS dots and unsafe input.
+
+## Slice B non-goals
+
+Slice B will not:
+
+- resolve domain names;
+- classify IP addresses;
+- perform HTTP requests;
+- follow redirects;
+- allow wildcard hosts;
+- allow suffix or parent-domain matching;
+- implicitly allow subdomains of an allowed host.
+
+## Slice B acceptance criteria
+
+- `Origin` equality and hashing use only scheme, normalized host and
+  effective port;
+- path, query and fragment never affect origin identity;
+- an exact allowlist match returns normally;
+- any other origin raises `ScopeValidationError` with
+  `ScopeErrorCode.ORIGIN_NOT_ALLOWED`;
+- an empty allowlist rejects every target;
+- tests cover default-port equivalence, scheme/port/host mismatches,
+  subdomain rejection, IPv4, IPv6 and empty allowlists.
