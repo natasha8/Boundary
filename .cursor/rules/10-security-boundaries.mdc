@@ -1,0 +1,18 @@
+---
+description: Security boundaries for scanner development
+alwaysApply: true
+---
+
+# Security boundaries
+
+- Treat every target URL, redirect, hostname and resolved IP address as untrusted input.
+- Validate scope before making a request and after every redirect.
+- Reject embedded URL credentials.
+- Block disallowed loopback, link-local, private and special-use addresses unless an explicit local-lab policy permits them.
+- Apply timeouts, response-size limits, concurrency limits and rate limits to network operations.
+- Active scanning must remain disabled by default.
+- Preserve the original request before applying any mutation.
+- A confirmed finding requires reproducible evidence.
+- Redact credentials before logging, displaying or persisting evidence.
+- Automated tests must never contact public Internet targets.
+- Use controlled local fixtures for all scanner integration tests.

@@ -1,0 +1,16 @@
+---
+description: Testing and verification requirements
+alwaysApply: true
+---
+
+# Testing requirements
+
+- Add or update tests before implementing behavior changes.
+- Test success, failure and boundary conditions.
+- Do not weaken assertions to make an implementation pass.
+- Do not skip failing tests without explicit approval.
+- Do not mock the main behavior being tested.
+- Use deterministic local fixtures.
+- Verify returned data and side effects, not only status codes.
+- Security controls require negative tests proving that unsafe input is rejected.
+- Run focused tests first, followed by the complete relevant suite.

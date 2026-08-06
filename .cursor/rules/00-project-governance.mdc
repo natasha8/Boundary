@@ -1,0 +1,18 @@
+---
+description: Project-wide engineering and architecture rules
+alwaysApply: true
+---
+
+# Project governance
+
+- Read AGENTS.md before planning or modifying files.
+- Work on one approved milestone or task at a time.
+- Do not generate speculative modules for future features.
+- Prefer functions and small cohesive modules over class hierarchies.
+- Do not create interfaces with only one implementation unless a real boundary requires it.
+- Do not create wrapper functions that add no validation, transformation or behavior.
+- Do not duplicate contracts or business rules.
+- Keep HTTP routes thin and domain logic independent from web frameworks.
+- Do not modify unrelated files.
+- Do not install or upgrade dependencies without explicit approval.
+- Do not claim completion until relevant checks have been executed.
