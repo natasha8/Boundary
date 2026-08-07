@@ -1,3 +1,5 @@
+"""Target URL parsing and scope allowlist checks for BOUNDARY."""
+
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
@@ -8,10 +10,12 @@ from ipaddress import (
     IPv6Network,
     ip_address,
 )
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 
 
 class UrlErrorCode(StrEnum):
+    """Stable machine-readable codes for URL validation failures."""
+
     MALFORMED_URL = "malformed_url"
     UNSUPPORTED_SCHEME = "unsupported_scheme"
     MISSING_HOST = "missing_host"
@@ -23,24 +27,34 @@ class UrlErrorCode(StrEnum):
 
 
 class UrlValidationError(ValueError):
+    """Raised when a target URL fails structural validation."""
+
     def __init__(self, code: UrlErrorCode, message: str) -> None:
+        """Attach a stable error code to the validation failure."""
         self.code = code
         super().__init__(message)
 
 
 class ScopeErrorCode(StrEnum):
+    """Stable machine-readable codes for scope validation failures."""
+
     ORIGIN_NOT_ALLOWED = "origin_not_allowed"
     INVALID_IP_ADDRESS = "invalid_ip_address"
     ADDRESS_NOT_ALLOWED = "address_not_allowed"
 
 
 class AddressPolicy(StrEnum):
+    """Policies that classify which resolved IP addresses are allowed."""
+
     PUBLIC = "public"
     LOCAL_LAB = "local_lab"
 
 
 class ScopeValidationError(ValueError):
+    """Raised when a target is outside the configured scope."""
+
     def __init__(self, code: ScopeErrorCode, message: str) -> None:
+        """Attach a stable error code to the scope failure."""
         self.code = code
         super().__init__(message)
 
@@ -62,6 +76,8 @@ _LOCAL_LAB_IPV6_NETWORKS = (
 
 @dataclass(frozen=True, slots=True)
 class Origin:
+    """Immutable scheme/host/port identity used for exact allowlist matching."""
+
     scheme: str
     host: str
     port: int
@@ -69,6 +85,8 @@ class Origin:
 
 @dataclass(frozen=True, slots=True)
 class TargetUrl:
+    """Normalized absolute HTTP(S) target produced by URL parsing."""
+
     scheme: str
     host: str
     port: int
@@ -78,6 +96,7 @@ class TargetUrl:
 
     @property
     def origin(self) -> Origin:
+        """Return the exact origin of this target."""
         return Origin(
             scheme=self.scheme,
             host=self.host,
@@ -92,6 +111,7 @@ _DEFAULT_PORTS = {
 
 
 def parse_target_url(raw: str) -> TargetUrl:
+    """Parse and normalize an absolute HTTP or HTTPS target URL."""
     if not raw:
         raise UrlValidationError(
             UrlErrorCode.MALFORMED_URL,
@@ -132,49 +152,11 @@ def parse_target_url(raw: str) -> TargetUrl:
             "Embedded URL credentials are not allowed.",
         )
 
-    host = parsed.hostname
-
-    if host is None:
-        raise UrlValidationError(
-            UrlErrorCode.MISSING_HOST,
-            "Target URL must contain a host.",
-        )
-
-    if not host.isascii():
-        raise UrlValidationError(
-            UrlErrorCode.NON_ASCII_HOST,
-            "Unicode hostnames must be supplied in ASCII Punycode form.",
-        )
-
-    host = _normalize_host(host)
-
-    if parsed.netloc.endswith(":"):
-        raise UrlValidationError(
-            UrlErrorCode.INVALID_PORT,
-            "Target URL contains an empty port.",
-        )
-
-    try:
-        parsed_port = parsed.port
-    except ValueError as error:
-        raise UrlValidationError(
-            UrlErrorCode.INVALID_PORT,
-            "Target URL contains an invalid port.",
-        ) from error
-
+    host = _extract_host(parsed)
     default_port = _DEFAULT_PORTS[scheme]
-    port = default_port if parsed_port is None else parsed_port
-
-    if not 1 <= port <= 65535:
-        raise UrlValidationError(
-            UrlErrorCode.INVALID_PORT,
-            "Target URL port must be between 1 and 65535.",
-        )
-
+    port = _resolve_port(parsed, default_port)
     path = parsed.path or "/"
-    display_host = f"[{host}]" if ":" in host else host
-
-    netloc = display_host if port == default_port else f"{display_host}:{port}"
+    netloc = _format_netloc(host, port, default_port)
 
     normalized_url = urlunsplit(
         (
@@ -200,11 +182,35 @@ def require_allowed_origin(
     target: TargetUrl,
     allowed_origins: Collection[Origin],
 ) -> None:
+    """Require that a target origin is present in the exact allowlist."""
     if target.origin not in allowed_origins:
         raise ScopeValidationError(
             ScopeErrorCode.ORIGIN_NOT_ALLOWED,
             "Target origin is not allowed.",
         )
+
+
+def resolve_allowed_redirect(
+    current: TargetUrl,
+    location: str,
+    allowed_origins: Collection[Origin],
+) -> TargetUrl:
+    """Resolve a Location against the current URL and enforce origin allowlisting."""
+    if _contains_unsafe_character(location):
+        raise UrlValidationError(
+            UrlErrorCode.UNSAFE_CHARACTER,
+            "Redirect location contains unsafe characters.",
+        )
+
+    if not location or location.startswith("#"):
+        raise UrlValidationError(
+            UrlErrorCode.MALFORMED_URL,
+            "Redirect location must identify a new resource.",
+        )
+
+    target = parse_target_url(urljoin(current.url, location))
+    require_allowed_origin(target, allowed_origins)
+    return target
 
 
 def require_allowed_address(
@@ -225,6 +231,57 @@ def require_allowed_address(
             ScopeErrorCode.ADDRESS_NOT_ALLOWED,
             "IP address is not allowed.",
         )
+
+
+def _extract_host(parsed: SplitResult) -> str:
+    host = parsed.hostname
+
+    if host is None:
+        raise UrlValidationError(
+            UrlErrorCode.MISSING_HOST,
+            "Target URL must contain a host.",
+        )
+
+    if not host.isascii():
+        raise UrlValidationError(
+            UrlErrorCode.NON_ASCII_HOST,
+            "Unicode hostnames must be supplied in ASCII Punycode form.",
+        )
+
+    return _normalize_host(host)
+
+
+def _resolve_port(parsed: SplitResult, default_port: int) -> int:
+    if parsed.netloc.endswith(":"):
+        raise UrlValidationError(
+            UrlErrorCode.INVALID_PORT,
+            "Target URL contains an empty port.",
+        )
+
+    try:
+        parsed_port = parsed.port
+    except ValueError as error:
+        raise UrlValidationError(
+            UrlErrorCode.INVALID_PORT,
+            "Target URL contains an invalid port.",
+        ) from error
+
+    port = default_port if parsed_port is None else parsed_port
+
+    if not 1 <= port <= 65535:
+        raise UrlValidationError(
+            UrlErrorCode.INVALID_PORT,
+            "Target URL port must be between 1 and 65535.",
+        )
+
+    return port
+
+
+def _format_netloc(host: str, port: int, default_port: int) -> str:
+    display_host = f"[{host}]" if ":" in host else host
+    if port == default_port:
+        return display_host
+    return f"{display_host}:{port}"
 
 
 def _is_address_allowed(

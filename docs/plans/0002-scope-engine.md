@@ -86,9 +86,34 @@ Implementation constraints for Slice C:
 
 ### Slice D: Redirect validation — in progress
 
-- validate every redirect destination;
-- prohibit automatic out-of-scope redirects;
-- retain an auditable rejection reason.
+Slice D resolves `Location` values against the current request URL and
+enforces exact origin allowlisting. It does not perform DNS resolution,
+does not validate resolved IPs after DNS, and does not implement redirect
+limits or loop detection.
+
+- expose `resolve_allowed_redirect(current, location, allowed_origins)` that
+  returns a normalized `TargetUrl`;
+- resolve root-relative, path-relative and query-only `Location` values
+  against the current URL using RFC `urljoin()` semantics;
+- accept absolute and scheme-relative redirects only when the normalized
+  destination origin is present in the exact allowlist;
+- treat explicit and implicit default ports as the same origin;
+- preserve non-default ports;
+- remove fragments from the returned normalized URL;
+- reject absolute redirects to another host, unapproved subdomains, scheme
+  changes and non-default ports unless that exact origin is allowlisted;
+- reject embedded credentials and unsupported schemes in the redirect URL;
+- reject raw backslashes, spaces, tabs, CR and LF in the original `Location`
+  value before `urljoin()` can normalize or remove them;
+- do not percent-decode the redirect path or query;
+- do not normalize path segments beyond the RFC resolution performed by
+  `urljoin()`;
+- raise `UrlValidationError` with the appropriate `UrlErrorCode` for
+  malformed or unsafe redirect URL input;
+- raise `ScopeValidationError` with `ScopeErrorCode.ORIGIN_NOT_ALLOWED`
+  for a valid redirect URL outside the origin allowlist;
+- do not introduce a redirect-specific exception or error enum unless tests
+  demonstrate a concrete need.
 
 ## Slice A non-goals
 
@@ -168,3 +193,32 @@ Slice C will not:
 - classification uses `ipaddress.ip_address()` only;
 - tests cover representative PUBLIC and LOCAL_LAB allow and reject cases
   without network or DNS activity.
+
+## Slice D non-goals
+
+Slice D will not:
+
+- resolve domain names or hostnames;
+- validate IP addresses after DNS;
+- perform HTTP requests;
+- enforce redirect hop limits;
+- detect redirect loops;
+- allow wildcard hosts, suffix matching or implicit subdomain allowance;
+- introduce a redirect-specific exception or error enum without a concrete
+  need demonstrated by tests.
+
+## Slice D acceptance criteria
+
+- relative `Location` values resolve against the current URL via `urljoin()`;
+- absolute and scheme-relative redirects are accepted only for exact
+  allowlisted origins;
+- default-port equivalence and non-default port preservation match Slice B;
+- fragments are removed from the normalized redirect URL;
+- raw paths and queries are preserved without percent-decoding beyond
+  `urljoin()` resolution;
+- unsafe `Location` characters are rejected before `urljoin()`;
+- embedded credentials and unsupported schemes raise `UrlValidationError`;
+- out-of-allowlist origins raise `ScopeValidationError` with
+  `ScopeErrorCode.ORIGIN_NOT_ALLOWED`;
+- tests cover success, failure and boundary cases without DNS or network
+  activity.
