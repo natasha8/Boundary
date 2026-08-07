@@ -52,14 +52,39 @@ Exact matching only: no wildcard matching, no suffix matching, and no
 implicit subdomain allowance. A host such as `api.example.com` is allowed
 only when that exact origin is configured.
 
-### Slice C: Address policy — in progress
+### Slice C: Address policy — complete
 
-- classify IPv4 and IPv6 addresses;
-- reject special-use addresses by default;
-- support an explicit local-lab policy;
-- validate every resolved address.
+Slice C validates already-resolved IP addresses. It does not perform DNS
+resolution and does not perform network requests.
 
-### Slice D: Redirect validation
+- expose `AddressPolicy` as a `StrEnum` with `PUBLIC` and `LOCAL_LAB`;
+- extend `ScopeErrorCode` with `INVALID_IP_ADDRESS` and
+  `ADDRESS_NOT_ALLOWED`;
+- expose `require_allowed_address(address, policy)` that returns `None` on
+  success;
+- under `PUBLIC`, allow only globally routable IPv4 and IPv6 addresses;
+- under `PUBLIC`, reject loopback, private, link-local, unspecified,
+  multicast, reserved/special-use, documentation ranges, and IPv4-mapped
+  IPv6 addresses whose mapped IPv4 address is not allowed;
+- under `LOCAL_LAB`, allow loopback, RFC1918 private IPv4, unique-local
+  IPv6 and link-local addresses;
+- under `LOCAL_LAB`, still reject invalid syntax, unspecified, multicast,
+  documentation ranges and other non-routable special-use ranges not
+  required for a local lab;
+- raise `ScopeValidationError` with `INVALID_IP_ADDRESS` for malformed
+  input and `ADDRESS_NOT_ALLOWED` for syntactically valid but disallowed
+  addresses.
+
+Implementation constraints for Slice C:
+
+- use only the Python standard-library `ipaddress` module;
+- parse with `ip_address()`;
+- do not use regex;
+- do not hard-code public allowlists;
+- do not resolve hostnames;
+- do not add a class or service.
+
+### Slice D: Redirect validation — in progress
 
 - validate every redirect destination;
 - prohibit automatic out-of-scope redirects;
@@ -114,3 +139,32 @@ Slice B will not:
 - an empty allowlist rejects every target;
 - tests cover default-port equivalence, scheme/port/host mismatches,
   subdomain rejection, IPv4, IPv6 and empty allowlists.
+
+## Slice C non-goals
+
+Slice C will not:
+
+- resolve domain names or hostnames;
+- perform DNS lookups;
+- perform HTTP requests;
+- follow redirects;
+- accept hostnames in place of IP addresses;
+- introduce a class or service for address policy.
+
+## Slice C acceptance criteria
+
+- `AddressPolicy` exposes stable `public` and `local_lab` values;
+- allowed addresses under the selected policy return normally;
+- malformed IP input raises `ScopeValidationError` with
+  `ScopeErrorCode.INVALID_IP_ADDRESS`;
+- disallowed addresses raise `ScopeValidationError` with
+  `ScopeErrorCode.ADDRESS_NOT_ALLOWED`;
+- `PUBLIC` rejects loopback, private, link-local, unspecified, multicast,
+  reserved/special-use, documentation and disallowed IPv4-mapped IPv6
+  addresses;
+- `LOCAL_LAB` allows loopback, RFC1918, unique-local IPv6 and link-local
+  addresses while still rejecting unspecified, multicast, documentation
+  and other non-lab special-use ranges;
+- classification uses `ipaddress.ip_address()` only;
+- tests cover representative PUBLIC and LOCAL_LAB allow and reject cases
+  without network or DNS activity.

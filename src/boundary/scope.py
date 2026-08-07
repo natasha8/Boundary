@@ -1,6 +1,13 @@
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+)
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -23,12 +30,34 @@ class UrlValidationError(ValueError):
 
 class ScopeErrorCode(StrEnum):
     ORIGIN_NOT_ALLOWED = "origin_not_allowed"
+    INVALID_IP_ADDRESS = "invalid_ip_address"
+    ADDRESS_NOT_ALLOWED = "address_not_allowed"
+
+
+class AddressPolicy(StrEnum):
+    PUBLIC = "public"
+    LOCAL_LAB = "local_lab"
 
 
 class ScopeValidationError(ValueError):
     def __init__(self, code: ScopeErrorCode, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+_LOCAL_LAB_IPV4_NETWORKS = (
+    IPv4Network("127.0.0.0/8"),
+    IPv4Network("10.0.0.0/8"),
+    IPv4Network("172.16.0.0/12"),
+    IPv4Network("192.168.0.0/16"),
+    IPv4Network("169.254.0.0/16"),
+)
+
+_LOCAL_LAB_IPV6_NETWORKS = (
+    IPv6Network("::1/128"),
+    IPv6Network("fe80::/10"),
+    IPv6Network("fc00::/7"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +205,48 @@ def require_allowed_origin(
             ScopeErrorCode.ORIGIN_NOT_ALLOWED,
             "Target origin is not allowed.",
         )
+
+
+def require_allowed_address(
+    address: str,
+    policy: AddressPolicy,
+) -> None:
+    """Require that a resolved IP address is allowed by the given policy."""
+    try:
+        parsed = ip_address(address)
+    except ValueError as error:
+        raise ScopeValidationError(
+            ScopeErrorCode.INVALID_IP_ADDRESS,
+            "IP address is invalid.",
+        ) from error
+
+    if not _is_address_allowed(parsed, policy):
+        raise ScopeValidationError(
+            ScopeErrorCode.ADDRESS_NOT_ALLOWED,
+            "IP address is not allowed.",
+        )
+
+
+def _is_address_allowed(
+    address: IPv4Address | IPv6Address,
+    policy: AddressPolicy,
+) -> bool:
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        return _is_address_allowed(address.ipv4_mapped, policy)
+
+    if address.is_global and not address.is_multicast:
+        return True
+
+    if policy is AddressPolicy.PUBLIC:
+        return False
+
+    networks: tuple[IPv4Network, ...] | tuple[IPv6Network, ...]
+    if isinstance(address, IPv4Address):
+        networks = _LOCAL_LAB_IPV4_NETWORKS
+    else:
+        networks = _LOCAL_LAB_IPV6_NETWORKS
+
+    return any(address in network for network in networks)
 
 
 def _normalize_host(host: str) -> str:
