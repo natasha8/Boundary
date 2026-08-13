@@ -1,7 +1,8 @@
 # ADR 0002: Use HTTPCore for controlled HTTP transport
 
-- Status: Accepted
+- Status: Accepted and implemented (Milestone 2)
 - Date: 2026-08-13
+- Implementation: `src/boundary/transport.py`
 
 ## Context
 
@@ -29,8 +30,9 @@ Candidates considered:
 
 ## Decision
 
-BOUNDARY will use **HTTPCore directly** for HTTP transport, through its public
-custom network-backend API.
+BOUNDARY uses **HTTPCore directly** for HTTP transport, through its public
+custom network-backend API. The Controlled HTTP Transport is implemented; the
+sections below describe the delivered behavior.
 
 ### Required flow
 
@@ -49,7 +51,8 @@ custom network-backend API.
 
 ### Pinned async network backend
 
-Transport will implement a small `AsyncNetworkBackend` wrapper that:
+Transport implements `PinnedAsyncNetworkBackend`, an `AsyncNetworkBackend`
+wrapper that:
 
 - accepts a prevalidated IP address at construction time;
 - rejects non-IP constructor values via `ipaddress.ip_address()`;
@@ -60,26 +63,65 @@ Transport will implement a small `AsyncNetworkBackend` wrapper that:
 - forwards `sleep` to the inner backend;
 - propagates underlying networking exceptions unchanged.
 
-Production code will use `httpcore.AnyIOBackend` as the inner backend.
-Connections and pools will be constructed with `network_backend=` so pinning
-uses only public HTTPCore APIs:
+Production code uses `httpcore.AnyIOBackend` as the inner backend. Pools are
+constructed with `network_backend=` so pinning uses only public HTTPCore APIs:
 
 - `httpcore.AsyncNetworkBackend`
 - `httpcore.AsyncNetworkStream`
 - `httpcore.AnyIOBackend`
-- `httpcore.AsyncHTTPConnection` / `httpcore.AsyncConnectionPool`
+- `httpcore.AsyncConnectionPool`
 
 HTTPCore applies TLS SNI through `start_tls(..., server_hostname=...)`
 independently of the `connect_tcp` host. Pinning the TCP dial therefore does
 not weaken certificate hostname verification when the request origin host is
 preserved.
 
+### Request execution
+
+`request_once` sends exactly one request over a pinned connection:
+
+- it wraps `httpcore.AnyIOBackend` in a `PinnedAsyncNetworkBackend` and opens
+  an isolated `httpcore.AsyncConnectionPool` per request, configured with
+  `max_connections=1`, `max_keepalive_connections=0`, `http1=True`,
+  `http2=False`, `retries=0`, and `uds=None`;
+- the original hostname remains authoritative for HTTP Host semantics and TLS
+  SNI: HTTPCore derives both from the request URL, and only the TCP dial uses
+  the pinned IP;
+- the response body is consumed incrementally from the streaming response under
+  a mandatory maximum byte limit; exceeding it raises
+  `TransportError(RESPONSE_TOO_LARGE)` and closes the stream without reading
+  the remaining bytes;
+- `RequestLimits` provides `max_body_bytes` plus `connect`, `read`, `write`,
+  and `pool` timeout values, each validated as `None`, zero, or a positive
+  finite float;
+- timeout enforcement is delegated to HTTPCore through its timeout extension
+  `{"timeout": {"connect": ..., "read": ..., "write": ..., "pool": ...}}`.
+  BOUNDARY implements no timer of its own.
+
 ### Redirects
 
-HTTPCore does not follow redirects. BOUNDARY will treat 3xx responses as
-terminal at the HTTPCore layer, then apply scope checks, re-resolve, revalidate,
-and reconnect under the same pinning rules. Automatic redirect following from
-HTTPX or any other client is out of scope.
+HTTPCore does not follow redirects, and no automatic redirect following from
+HTTPX or any other client is used. `request_with_redirects` handles redirects
+manually: 3xx responses are terminal at the HTTPCore layer, and every followed
+redirect
+
+- passes origin validation through `require_allowed_origin` on the destination
+  produced by `resolve_allowed_redirect`;
+- resolves DNS again for the destination host;
+- validates every returned address through `resolve_allowed_addresses`;
+- selects a newly validated pinned IP for the next hop.
+
+Redirect handling is fail-closed:
+
+- a hop limit (`max_redirects`) raises `TransportError(TOO_MANY_REDIRECTS)`;
+- loop detection over normalized hop URLs raises
+  `TransportError(REDIRECT_LOOP)`;
+- duplicate `Location` headers are rejected with
+  `TransportError(INVALID_REDIRECT)`;
+- malformed `Location` values fail closed: non-ASCII bytes raise a decode
+  error, and unsafe, credential-bearing, or out-of-allowlist values surface
+  `UrlValidationError` / `ScopeValidationError` unchanged instead of being
+  followed.
 
 ### Destination selection
 
@@ -87,22 +129,40 @@ When multiple addresses pass policy, transport selects the first address from
 `resolve_allowed_addresses`. Happy Eyeballs and connect-time address fallback
 are out of scope; they would constitute a retry framework.
 
-### Connection reuse
+### Connection reuse identity
 
 A single `AsyncConnectionPool` sharing one pinned backend would send every
-origin to the same IP. Reuse is allowed only when scheme, host, port, and pinned
-IP all match. Initial delivery opens one connection and closes it; keep-alive
-under that key is a later slice.
+origin to the same IP, so hostname-keyed reuse is unsafe. Reuse identity is
+therefore defined by `ConnectionReuseKey`:
 
-### Minimum concepts
+    (scheme, host, port, pinned_ip)
 
-The initial architecture contains only:
+`connection_reuse_key` builds it from a normalized `TargetUrl` and a
+prevalidated pinned IP, canonicalizing the pinned value through
+`ipaddress.ip_address()` so equivalent textual forms (notably IPv6) compare
+equal and non-IP values are rejected.
 
-- a pinned async network backend;
-- controlled request transport;
-- request limits / configuration when timeouts and size limits require it;
-- a BOUNDARY response representation only when consuming or closing the
-  HTTPCore stream creates a concrete need.
+**Persistent connection pooling and keep-alive reuse are intentionally
+deferred.** Only the identity and the policy it encodes are implemented.
+`request_once` remains isolated: one pool per request with
+`max_keepalive_connections=0`, opened and closed around a single request.
+
+Why the deferral: an HTTPCore pool binds to one network backend, while
+BOUNDARY's backend is pinned to one validated IP. Safe persistent reuse
+therefore requires lifecycle management keyed by `ConnectionReuseKey` —
+per-key pools, eviction, and revalidation on pin change. That machinery is not
+justified until Discovery/Crawler work demonstrates a concrete performance
+need.
+
+### Delivered surface
+
+The transport module contains only:
+
+- `PinnedAsyncNetworkBackend`;
+- `request_once` and `request_with_redirects`;
+- `RequestLimits`, `TransportResponse`, `TransportError` /
+  `TransportErrorCode`;
+- `ConnectionReuseKey` and `connection_reuse_key`.
 
 ### Explicitly excluded
 
@@ -119,8 +179,8 @@ The initial architecture contains only:
 
 ### Dependency
 
-Implementation will add `httpcore[asyncio]` (which pulls `anyio` for
-`AnyIOBackend`). This decision does not install that dependency by itself.
+`httpcore[asyncio]` is the single runtime dependency (it pulls `anyio` for
+`AnyIOBackend`).
 
 ## Why not HTTPX
 
@@ -155,6 +215,10 @@ Positive:
 
 Negative:
 
-- BOUNDARY must implement redirect loops, size limits, and Host construction;
-- connection reuse must be keyed by origin and pinned IP, not by hostname alone;
-- `httpcore[asyncio]` becomes a runtime dependency when implementation starts.
+- BOUNDARY owns redirect hop and loop control, response-size limits, and
+  redirect revalidation;
+- connection reuse is keyed by origin and pinned IP, not by hostname alone, and
+  persistent reuse stays unavailable until that lifecycle is built;
+- every request opens and closes its own connection, so repeated requests to
+  one origin pay a full connect (and TLS handshake) each time;
+- `httpcore[asyncio]` is a runtime dependency.

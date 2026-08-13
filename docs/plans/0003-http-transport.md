@@ -1,8 +1,10 @@
 # Controlled HTTP Transport Plan
 
-- Status: Planned
+- Status: Completed
 - Branch: feat/http-transport
 - Started: 2026-08-13
+- Completed: 2026-08-13
+- Implementation: `src/boundary/transport.py`
 
 ## Purpose
 
@@ -40,13 +42,13 @@ Transport remains responsible for:
 Grow a single module `src/boundary/transport.py` in the same style as
 `src/boundary/scope.py`: functions and small cohesive types, no service layer.
 
-Initial concepts only:
+Delivered concepts:
 
-- a pinned async network backend;
-- controlled request transport;
-- request limits / configuration when Slice C needs them;
-- a BOUNDARY response representation only when size limits or redirect handling
-  require consuming or closing the HTTPCore stream.
+- `PinnedAsyncNetworkBackend`;
+- `request_once` and `request_with_redirects`;
+- `RequestLimits`;
+- `TransportResponse`, `TransportError` and `TransportErrorCode`;
+- `ConnectionReuseKey` and `connection_reuse_key`.
 
 Required request flow:
 
@@ -68,15 +70,14 @@ HTTPCore is used through its public custom network-backend API:
 - `httpcore.AsyncNetworkBackend`
 - `httpcore.AsyncNetworkStream`
 - `httpcore.AnyIOBackend` as the production inner backend
-- `httpcore.AsyncHTTPConnection` / `httpcore.AsyncConnectionPool` with
-  `network_backend=`
+- `httpcore.AsyncConnectionPool` with `network_backend=`
 
-Implementation will add `httpcore[asyncio]` when Slice A coding begins. This
-plan document does not install dependencies.
+`httpcore[asyncio]` is the single runtime dependency; no other dependency was
+added.
 
 ## Non-goals for the milestone
 
-Transport will not introduce:
+Transport did not introduce:
 
 - HTTPX;
 - generic repository patterns;
@@ -104,7 +105,7 @@ Transport will not introduce:
 
 ## Delivery slices
 
-### Slice A: Pinned TCP backend
+### Slice A: Pinned TCP backend — completed
 
 Slice A implements `PinnedAsyncNetworkBackend`, a subclass of
 `httpcore.AsyncNetworkBackend` that dials a prevalidated IP and never resolves
@@ -151,7 +152,7 @@ Slice A will not:
 - `connect_unix_socket` is refused;
 - IPv4 and IPv6 literal pins are both covered.
 
-### Slice B: Controlled single HTTP request
+### Slice B: Controlled single HTTP request — completed
 
 Slice B implements the first end-to-end scoped request using HTTPCore and the
 pinned backend.
@@ -184,20 +185,21 @@ Slice B will not:
 - HTTPCore connection retries remain disabled;
 - tests cover success and rejection paths with zero public-Internet contact.
 
-### Slice C: Timeouts and response-size limits
+### Slice C: Timeouts and response-size limits — completed
 
 Slice C adds explicit request limits.
 
 Behavior:
 
-- introduce a frozen `RequestLimits` value object with connect, read, and write
-  timeouts plus a maximum response body size in bytes;
-- map timeouts onto HTTPCore request extensions
-  `{"timeout": {"connect": ..., "read": ..., "write": ...}}`;
-- enforce the body-size limit while reading the response stream and close the
-  stream on excess;
-- introduce a small BOUNDARY response value object only if needed to hold
-  capped bytes together with status and headers.
+- introduce a frozen `RequestLimits` value object with `max_body_bytes` plus
+  connect, read, write and pool timeouts, each validated as `None`, zero, or a
+  positive finite float;
+- delegate timeout enforcement to HTTPCore through its timeout extension
+  `{"timeout": {"connect": ..., "read": ..., "write": ..., "pool": ...}}`;
+- consume the response body incrementally and enforce the mandatory
+  `max_body_bytes` limit while reading, closing the stream on excess;
+- introduce the frozen `TransportResponse` value object holding status, raw
+  headers and the capped body.
 
 #### Slice C non-goals
 
@@ -210,14 +212,15 @@ Slice C will not:
 
 #### Slice C acceptance criteria
 
-- connect, read, and write timeouts are applied through HTTPCore extensions;
+- connect, read, write and pool timeouts are applied through HTTPCore
+  extensions;
 - responses larger than the configured limit are rejected and the stream is
   closed;
 - within-limit bodies are returned completely;
 - tests cover timeout configuration mapping and size-limit boundary cases
   without public-Internet contact.
 
-### Slice D: Manual redirect loop
+### Slice D: Manual redirect loop — completed
 
 Slice D follows redirects under Scope Engine rules.
 
@@ -229,6 +232,9 @@ Behavior:
   connecting;
 - create a new pinned backend for the newly selected validated IP;
 - enforce a hop limit and loop detection on normalized URLs;
+- reject duplicate `Location` headers with
+  `TransportErrorCode.INVALID_REDIRECT`;
+- fail closed on malformed `Location` values rather than following them;
 - preserve `UrlValidationError` and `ScopeValidationError` without swallowing
   them;
 - never use HTTPCore or HTTPX automatic redirect following.
@@ -252,40 +258,95 @@ Slice D will not:
 - each accepted hop preserves Host/SNI from the hop’s `TargetUrl.host`;
 - tests cover success, rejection, hop-limit, and loop cases offline.
 
-### Slice E: Connection reuse policy
+### Slice E: Connection reuse identity and policy — completed
 
-Slice E allows keep-alive only under a strict key.
+Slice E defines the identity under which a connection could ever be shared. It
+delivers reuse identity and policy only; it does not deliver persistent
+pooling.
 
 Behavior:
 
-- reuse a connection only when scheme, host, port, and pinned IP all match;
-- refuse cross-origin reuse;
-- refuse reuse when the pinned IP differs even if the hostname matches;
-- keep `retries=0`;
-- do not introduce a generic pool service beyond what HTTPCore already provides
-  for a single keyed connection.
+- `ConnectionReuseKey` fixes reuse identity as
+  `(scheme, host, port, pinned_ip)`;
+- `connection_reuse_key` builds the key from a normalized `TargetUrl` and a
+  prevalidated pinned IP, canonicalizing the pinned value through
+  `ipaddress.ip_address()` and rejecting non-IP values;
+- a different scheme, host, port, or pinned IP produces a different key, so
+  cross-origin and changed-pin reuse are excluded by construction;
+- `request_once` stays isolated: one pool per request with
+  `max_keepalive_connections=0` and `retries=0`.
 
 #### Slice E non-goals
 
-Slice E will not:
+Slice E did not:
 
+- implement persistent pooling, keep-alive lifecycle, or a pool cache;
 - share one pinned backend across unrelated origins;
 - add retry, backoff, or circuit-breaker frameworks;
 - add proxies or HTTP/2 multiplexing policy.
 
 #### Slice E acceptance criteria
 
-- matching origin and pinned IP may reuse a keep-alive connection;
-- a different origin or different pinned IP opens a new connection;
+- the key contains exactly scheme, host, port and pinned IP, and is immutable;
+- equal normalized origins with the same pinned IP produce equal keys;
+- a different origin, port, scheme, or pinned IP produces a different key;
+- IPv6 pins compare by canonical form and non-IP pins are rejected;
 - tests prove reuse eligibility and refusal without public-Internet contact.
+
+## Deferred: persistent connection pooling
+
+Persistent connection pooling and keep-alive reuse are deferred, not
+implemented.
+
+An HTTPCore pool binds to one network backend, while BOUNDARY's backend is
+pinned to one validated IP. Safe persistent reuse therefore requires lifecycle
+management keyed by `ConnectionReuseKey`. That machinery is not justified until
+Discovery/Crawler work demonstrates a concrete performance need.
+
+## Final security invariants
+
+- no second DNS lookup happens between address validation and TCP connect: the
+  pinned backend dials a prevalidated IP and never resolves;
+- the pinned value must be an IP address; hostnames and malformed values are
+  rejected at construction;
+- Unix-domain sockets are refused, so pinning cannot be bypassed;
+- the original hostname stays authoritative for HTTP Host semantics and TLS
+  SNI / certificate hostname verification;
+- every request carries a mandatory maximum body size, and the body is read
+  incrementally so an oversized response is rejected before it is buffered;
+- connect, read, write and pool timeouts are always applied through HTTPCore's
+  timeout extension;
+- redirects are never followed automatically; each hop revalidates origin,
+  re-resolves DNS, validates every returned address, and pins a newly validated
+  IP;
+- hop limits, normalized-URL loop detection, duplicate `Location` headers and
+  malformed `Location` values all fail closed;
+- `UrlValidationError` and `ScopeValidationError` propagate unchanged;
+- connection reuse can never be selected by hostname or IP alone;
+- retries stay disabled (`retries=0`);
+- tests run offline: autouse guards fail transport tests immediately on DNS
+  resolution or real socket I/O.
+
+## Test coverage
+
+Offline transport tests, all passing:
+
+- `tests/test_pinned_backend.py`: 17 tests;
+- `tests/test_transport_request.py`: 38 tests;
+- `tests/test_transport_redirects.py`: 26 tests;
+- `tests/test_transport_reuse.py`: 15 tests.
+
+Full suite: 235 tests passing, with no skipped tests.
 
 ## Definition of done for the milestone
 
-The milestone is complete when:
+Met:
 
 - all slices A–E meet their acceptance criteria;
 - relevant security boundaries have negative tests;
-- checks pass without skipped or weakened tests;
-- documentation matches the implementation;
+- `ruff format --check`, `ruff check`, `mypy` and `pytest` pass without skipped
+  or weakened tests;
+- documentation matches the implementation, including the deferred pooling
+  decision;
 - no secrets or sensitive evidence are exposed;
-- automated tests still never contact public Internet targets.
+- automated tests never contact public Internet targets.
