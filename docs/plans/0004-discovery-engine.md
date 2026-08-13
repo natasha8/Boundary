@@ -279,20 +279,29 @@ Slice A will not:
 
 ### Slice B: Candidate URL resolution and filtering
 
-Tests: `tests/test_discovery_candidates.py`
+Tests: `tests/test_discovery_candidates.py`, plus a Scope Engine regression in
+`tests/test_scope.py` that `resolve_allowed_redirect` converts `urljoin` parse
+failures into `UrlValidationError` (`MALFORMED_URL`).
 
 Behavior:
 
 - implement `resolve_candidate(base, reference, allowed_origins)`;
-- strip surrounding ASCII whitespace from the reference, then reject a reference
-  that cannot identify a new resource — empty or beginning with `#` — as
-  `resolve_allowed_redirect` already does for `Location` values;
-- resolve the remaining reference with `urljoin(base.url, reference)`;
-- validate the result with `parse_target_url`, then `require_allowed_origin`;
+- strip only leading and trailing HTML URL-attribute ASCII whitespace
+  (`" \t\n\f\r"`) from the extracted reference; do not use unrestricted
+  `str.strip()`;
+- this HTML preprocessing is not applied to HTTP `Location` values, which
+  remain validated raw by `resolve_allowed_redirect`;
+- delegate the stripped reference to `resolve_allowed_redirect`, which already
+  rejects a reference that cannot identify a new resource — empty or beginning
+  with `#` — then resolves with `urljoin`, `parse_target_url` and
+  `require_allowed_origin`;
 - return the normalized `TargetUrl` on success;
 - return `None` for any rejected reference, converting `UrlValidationError` and
   `ScopeValidationError` into "no candidate" rather than propagating them, since
   rejecting untrusted page content is the expected outcome;
+- do not catch arbitrary `ValueError`: the Scope Engine wraps `urljoin` parse
+  failures such as `http://[::1` as `UrlValidationError` with
+  `UrlErrorCode.MALFORMED_URL`;
 - never perform a request, a DNS lookup or any I/O.
 
 #### Slice B non-goals
@@ -305,7 +314,9 @@ Slice B will not:
 - honor `<base href>`;
 - canonicalize queries, percent-decode, or normalize path segments beyond
   `urljoin`;
-- allow wildcard, suffix or subdomain scope matching.
+- allow wildcard, suffix or subdomain scope matching;
+- change HTTP `Location` whitespace or control-character validation;
+- catch arbitrary `ValueError` from `resolve_candidate`.
 
 #### Slice B acceptance criteria
 
@@ -320,8 +331,9 @@ Accepted, returning a normalized in-scope `TargetUrl`:
   port and a distinct scheme when those exact origins are configured;
 - a reference whose only difference from the base is its fragment, which returns
   the base identity and is therefore suppressed later as a duplicate;
-- a reference padded with surrounding whitespace or newlines, which is stripped
-  before resolution.
+- a reference padded with surrounding HTML URL-attribute ASCII whitespace
+  (`"  /api/users  "`, `"\n/api/users\n"`, `"\t/api/users\r\n"`), which is
+  stripped before resolution.
 
 Rejected, returning `None`:
 
@@ -333,7 +345,10 @@ Rejected, returning `None`:
 - a credential-bearing URL (`https://u:p@app.test/`);
 - a malformed URL, an invalid or empty port, and an ambiguous host;
 - a reference containing an internal raw backslash, space, tab, CR, LF or other
-  control character, which is never stripped away to make the reference usable;
+  control character (`/api/\nusers`, `/api/\rusers`, `/api/\tusers`), which is
+  never stripped away to make the reference usable;
+- vertical tab, NBSP or other non-HTML whitespace used as padding, which
+  unrestricted `str.strip()` would have removed;
 - an absolute URL on a non-allowlisted origin, including an unapproved
   subdomain, an unapproved port and an unapproved scheme;
 - every reference when the allowlist is empty.

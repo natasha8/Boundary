@@ -170,17 +170,27 @@ non-mutating probe that still proves the endpoint exists.
 
 ### 9. Candidate resolution reuses existing validation
 
-A candidate reference is resolved with standard URL-reference resolution
-(`urllib.parse.urljoin`) against the URL the body was actually served from, then
-validated by `parse_target_url` and `require_allowed_origin`. This is the same
-sequence `resolve_allowed_redirect` already uses for `Location`, so redirect
-destinations and page links are subject to identical rules.
+A candidate reference extracted from an HTML URL attribute is first stripped of
+leading and trailing HTML ASCII whitespace — the five characters
+`" \t\n\f\r"` (space, tab, LF, form feed, CR). This preprocessing matches how
+HTML URL attributes are read. It is specific to extracted HTML URL attributes
+and is **not** applied to HTTP `Location` values, which remain validated raw.
 
-Surrounding ASCII whitespace in an HTML URL attribute is stripped before
-resolution, matching how HTML URL attributes are read. Whitespace and control
-characters *inside* a reference are not stripped and cause rejection: emulating
-browser tolerance here would silently repair exactly the malformed input that
-`_contains_unsafe_character` is meant to reject.
+Python's unrestricted `str.strip()` is not used: it would also remove vertical
+tab, NBSP and other non-HTML whitespace, silently repairing references that
+must stay rejected.
+
+The remaining reference is then resolved with standard URL-reference resolution
+(`urllib.parse.urljoin`) against the URL the body was actually served from, then
+validated by `parse_target_url` and `require_allowed_origin`. After that
+preprocessing step, this is the same sequence `resolve_allowed_redirect` uses
+for `Location`.
+
+Whitespace and control characters *inside* a reference are not stripped and
+cause rejection: emulating browser tolerance here would silently repair exactly
+the malformed input that `_contains_unsafe_character` is meant to reject. An
+`href` such as `"  /api/\nusers  "` is therefore still rejected after the
+surrounding HTML whitespace has been removed.
 
 ### 10. Fragments are irrelevant to identity
 
@@ -216,9 +226,15 @@ of the input:
 
 - during candidate filtering, rejection is the *expected* outcome for untrusted
   page content — a page containing `mailto:` links or third-party scripts is
-  entirely normal, so rejection returns "no candidate" rather than raising;
+  entirely normal, so `resolve_candidate` converts `UrlValidationError` and
+  `ScopeValidationError` into `None` rather than raising;
 - at request time, a failure means an *already admitted* target failed a runtime
   control, which is exceptional and propagates unchanged.
+
+`resolve_candidate` does not catch arbitrary `ValueError`. `urljoin` parse
+failures such as an unterminated IPv6 literal (`http://[::1`) are normalized by
+the Scope Engine into `UrlValidationError` with `UrlErrorCode.MALFORMED_URL`, so
+discovery sees only the structured validation errors.
 
 ### 13-17. No browser, no JavaScript, no state change
 

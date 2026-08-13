@@ -1,9 +1,18 @@
 """Discovery limits and the bounded frontier used by controlled traversal."""
 
 from collections import deque
+from collections.abc import Collection
 from dataclasses import dataclass
 
-from boundary.scope import TargetUrl
+from boundary.scope import (
+    Origin,
+    ScopeValidationError,
+    TargetUrl,
+    UrlErrorCode,
+    UrlValidationError,
+    parse_target_url,
+    resolve_allowed_redirect,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,3 +70,30 @@ class Frontier:
 
     def __len__(self) -> int:
         return len(self._queue)
+
+
+def resolve_candidate(
+    base: TargetUrl,
+    reference: str,
+    allowed_origins: Collection[Origin],
+) -> TargetUrl | None:
+    """Resolve an HTML URL reference into a scope-approved target, or None."""
+    stripped = reference.strip(" \t\n\f\r")
+
+    if not stripped or stripped.startswith("#"):
+        return None
+
+    try:
+        parse_target_url(stripped)
+    except UrlValidationError as error:
+        if error.code is not UrlErrorCode.MALFORMED_URL:
+            return None
+
+    try:
+        return resolve_allowed_redirect(
+            current=base,
+            location=stripped,
+            allowed_origins=allowed_origins,
+        )
+    except (UrlValidationError, ScopeValidationError):
+        return None

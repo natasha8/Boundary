@@ -649,6 +649,19 @@ def test_resolve_allowed_redirect_rejects_unsafe_location(
     assert error.value.code is expected_code
 
 
+@pytest.mark.parametrize("location", ["http://[::1", "//[::1"])
+def test_resolve_allowed_redirect_wraps_urljoin_parse_failures(
+    location: str,
+) -> None:
+    current = parse_target_url("https://example.com/account")
+    allowed = {current.origin}
+
+    with pytest.raises(UrlValidationError) as error:
+        resolve_allowed_redirect(current, location, allowed)
+
+    assert error.value.code is UrlErrorCode.MALFORMED_URL
+
+
 @pytest.mark.parametrize(
     ("current_url", "location", "expected_path", "expected_query", "expected_url"),
     [

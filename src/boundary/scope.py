@@ -220,7 +220,15 @@ def resolve_allowed_redirect(
             "Redirect location must identify a new resource.",
         )
 
-    target = parse_target_url(urljoin(current.url, location))
+    try:
+        resolved = urljoin(current.url, location)
+    except ValueError as error:
+        raise UrlValidationError(
+            UrlErrorCode.MALFORMED_URL,
+            "Redirect location is malformed.",
+        ) from error
+
+    target = parse_target_url(resolved)
     require_allowed_origin(target, allowed_origins)
     return target
 
