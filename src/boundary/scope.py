@@ -10,6 +10,7 @@ from ipaddress import (
     IPv6Network,
     ip_address,
 )
+from typing import Protocol
 from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 
 
@@ -41,6 +42,7 @@ class ScopeErrorCode(StrEnum):
     ORIGIN_NOT_ALLOWED = "origin_not_allowed"
     INVALID_IP_ADDRESS = "invalid_ip_address"
     ADDRESS_NOT_ALLOWED = "address_not_allowed"
+    NO_RESOLVED_ADDRESSES = "no_resolved_addresses"
 
 
 class AddressPolicy(StrEnum):
@@ -48,6 +50,16 @@ class AddressPolicy(StrEnum):
 
     PUBLIC = "public"
     LOCAL_LAB = "local_lab"
+
+
+class AddressResolver(Protocol):
+    """Minimal async resolver used to obtain addresses for a host."""
+
+    async def resolve(
+        self,
+        host: str,
+        port: int,
+    ) -> Collection[str]: ...
 
 
 class ScopeValidationError(ValueError):
@@ -218,19 +230,36 @@ def require_allowed_address(
     policy: AddressPolicy,
 ) -> None:
     """Require that a resolved IP address is allowed by the given policy."""
-    try:
-        parsed = ip_address(address)
-    except ValueError as error:
-        raise ScopeValidationError(
-            ScopeErrorCode.INVALID_IP_ADDRESS,
-            "IP address is invalid.",
-        ) from error
+    _parse_allowed_address(address, policy)
 
-    if not _is_address_allowed(parsed, policy):
+
+async def resolve_allowed_addresses(
+    host: str,
+    port: int,
+    policy: AddressPolicy,
+    resolver: AddressResolver,
+) -> tuple[str, ...]:
+    """Resolve a host once and require every address under the given policy."""
+    addresses = await resolver.resolve(host, port)
+
+    if not addresses:
         raise ScopeValidationError(
-            ScopeErrorCode.ADDRESS_NOT_ALLOWED,
-            "IP address is not allowed.",
+            ScopeErrorCode.NO_RESOLVED_ADDRESSES,
+            "Host resolved to no addresses.",
         )
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+
+    for address in addresses:
+        parsed = _parse_allowed_address(address, policy)
+        normalized = str(parsed)
+
+        if normalized not in seen:
+            seen.add(normalized)
+            resolved.append(normalized)
+
+    return tuple(resolved)
 
 
 def _extract_host(parsed: SplitResult) -> str:
@@ -282,6 +311,27 @@ def _format_netloc(host: str, port: int, default_port: int) -> str:
     if port == default_port:
         return display_host
     return f"{display_host}:{port}"
+
+
+def _parse_allowed_address(
+    address: str,
+    policy: AddressPolicy,
+) -> IPv4Address | IPv6Address:
+    try:
+        parsed = ip_address(address)
+    except ValueError as error:
+        raise ScopeValidationError(
+            ScopeErrorCode.INVALID_IP_ADDRESS,
+            "IP address is invalid.",
+        ) from error
+
+    if not _is_address_allowed(parsed, policy):
+        raise ScopeValidationError(
+            ScopeErrorCode.ADDRESS_NOT_ALLOWED,
+            "IP address is not allowed.",
+        )
+
+    return parsed
 
 
 def _is_address_allowed(
