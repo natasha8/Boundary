@@ -3,6 +3,7 @@
 from collections import deque
 from collections.abc import Collection
 from dataclasses import dataclass
+from html.parser import HTMLParser
 
 from boundary.scope import (
     Origin,
@@ -97,3 +98,59 @@ def resolve_candidate(
         )
     except (UrlValidationError, ScopeValidationError):
         return None
+
+
+def is_html_response(
+    headers: Collection[tuple[bytes, bytes]],
+) -> bool:
+    """Return True when headers carry exactly one text/html Content-Type."""
+    values = [value for name, value in headers if name.lower() == b"content-type"]
+    if len(values) != 1:
+        return False
+
+    try:
+        decoded = values[0].decode("ascii")
+    except UnicodeDecodeError:
+        return False
+
+    media_type = decoded.split(";", 1)[0].strip(" \t")
+    return media_type.lower() == "text/html"
+
+
+class _HtmlReferenceParser(HTMLParser):
+    _ATTRIBUTES = {
+        "a": "href",
+        "form": "action",
+        "script": "src",
+        "link": "href",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.references: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        wanted = self._ATTRIBUTES.get(tag)
+        if wanted is None:
+            return
+
+        for name, value in attrs:
+            if name == wanted:
+                if value is not None:
+                    self.references.append(value)
+                break
+
+
+def extract_html_references(
+    body: bytes,
+) -> tuple[str, ...]:
+    """Return document-order URL attributes from UTF-8 HTML bytes."""
+    text = body.decode("utf-8")
+    parser = _HtmlReferenceParser()
+    parser.feed(text)
+    parser.close()
+    return tuple(parser.references)
