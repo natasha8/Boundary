@@ -6,7 +6,7 @@ import asyncio
 import socket
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Protocol
 
 import anyio
 import pytest
@@ -190,20 +190,17 @@ def _run(
     method: str = "GET",
     headers: Collection[tuple[bytes, bytes]] = (),
 ) -> TransportResponse:
-    return cast(
-        TransportResponse,
-        asyncio.run(
-            request_with_redirects(
-                parse_target_url(target_url),
-                allowed_origins=allowed_origins,
-                policy=policy,
-                resolver=resolver,
-                limits=limits,
-                max_redirects=max_redirects,
-                method=method,
-                headers=headers,
-            )
-        ),
+    return asyncio.run(
+        request_with_redirects(
+            parse_target_url(target_url),
+            allowed_origins=allowed_origins,
+            policy=policy,
+            resolver=resolver,
+            limits=limits,
+            max_redirects=max_redirects,
+            method=method,
+            headers=headers,
+        )
     )
 
 
