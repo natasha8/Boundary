@@ -1,8 +1,9 @@
 # Scope Engine Plan
 
-- Status: In progress
+- Status: Complete
 - Branch: feat/scope-engine
 - Started: 2026-08-07
+- Completed: 2026-08-13
 
 ## Purpose
 
@@ -10,6 +11,33 @@ The Scope Engine decides whether a target may be processed by BOUNDARY.
 
 It must reject malformed or ambiguous input before any DNS resolution or
 network request occurs.
+
+## Completed foundation
+
+The completed Scope Engine now provides:
+
+- strict HTTP/HTTPS target URL parsing;
+- normalized `TargetUrl` and `Origin` value objects;
+- exact origin allowlisting;
+- `PUBLIC` and `LOCAL_LAB` address policies;
+- redirect destination validation;
+- an `AddressResolver` Protocol;
+- validation of every resolved address;
+- canonicalization and order-preserving deduplication;
+- `SystemAddressResolver` based on the running asyncio event loop;
+- offline integration coverage between resolver and scope policy.
+
+## Remaining transport responsibilities
+
+The HTTP transport layer, not the Scope Engine, remains responsible for:
+
+- pinning connections to already validated IP addresses;
+- preventing a second DNS lookup during connection establishment;
+- preserving the original hostname for HTTP Host and TLS SNI;
+- connection timeout;
+- response size limits;
+- redirect count and loop detection;
+- connection reuse and retry policy.
 
 ## Delivery slices
 
@@ -115,12 +143,13 @@ limits or loop detection.
 - do not introduce a redirect-specific exception or error enum unless tests
   demonstrate a concrete need.
 
-### Slice E: Controlled DNS resolution — in progress
+### Slice E: Controlled DNS resolution — complete
 
 Slice E resolves a hostname through an injected async resolver and validates
-every returned address against the selected `AddressPolicy`. It does not
-perform concrete socket DNS lookups, caching, retries, timeouts, or DNS
-rebinding protection.
+every returned address against the selected `AddressPolicy`. Concrete lookup
+uses `SystemAddressResolver` on the running asyncio event loop. Caching,
+retries, timeouts, connection pinning and DNS rebinding protection remain
+transport responsibilities.
 
 - expose `AddressResolver` as a minimal `typing.Protocol` with
   `async resolve(self, host: str, port: int) -> Collection[str]`;
@@ -139,9 +168,11 @@ rebinding protection.
   that fails existing address validation;
 - do not silently discard invalid or disallowed addresses;
 - do not create a DNS service class;
-- do not use `socket` directly in this slice;
-- unit tests must inject a fake resolver and must not perform real DNS or
-  HTTP.
+- provide `SystemAddressResolver` that calls `getaddrinfo` on the running
+  asyncio event loop;
+- cover resolver and scope policy together with offline integration tests;
+- unit tests inject a fake resolver or a fake event loop and must not
+  perform real DNS or HTTP.
 
 ## Slice A non-goals
 
@@ -255,15 +286,17 @@ Slice D will not:
 
 Slice E will not:
 
-- perform concrete DNS lookups via `socket` or system resolvers;
-- implement DNS rebinding protection;
-- add caching, retries or timeouts;
+- pin connections to already validated IP addresses;
+- prevent a second DNS lookup during connection establishment;
+- preserve the original hostname for HTTP Host and TLS SNI;
+- add connection timeout, response size limits, redirect count or loop
+  detection;
+- add connection reuse or retry policy;
 - create a DNS service class;
 - perform HTTP requests;
 - catch and swallow `ScopeValidationError` from address validation.
 
-DNS rebinding protection, caching, timeouts and concrete socket resolution
-remain future transport-level work.
+Those connection and request controls remain HTTP transport responsibilities.
 
 ## Slice E acceptance criteria
 
@@ -277,4 +310,6 @@ remain future transport-level work.
 - invalid resolver output preserves `INVALID_IP_ADDRESS`;
 - disallowed resolver output preserves `ADDRESS_NOT_ALLOWED`;
 - PUBLIC and LOCAL_LAB policies are both covered by tests;
-- tests use an injected fake resolver with no network or DNS activity.
+- `SystemAddressResolver` uses the running asyncio event loop;
+- tests cover resolver and scope policy together without network or DNS
+  activity.
