@@ -46,6 +46,15 @@ class RequestOnceCall:
     limits: RequestLimits
 
 
+@dataclass(frozen=True, slots=True)
+class _ScriptedResponse:
+    """Scripted hop body; RecordingRequestOnce attaches the requested target."""
+
+    status: int
+    headers: tuple[tuple[bytes, bytes], ...]
+    body: bytes
+
+
 class RecordingResolver:
     """Minimal AddressResolver that records calls and returns scripted addresses."""
 
@@ -76,7 +85,7 @@ class RecordingRequestOnce:
 
     def __init__(
         self,
-        responses: Sequence[TransportResponse | BaseException],
+        responses: Sequence[_ScriptedResponse | BaseException],
     ) -> None:
         self._responses = list(responses)
         self.calls: list[RequestOnceCall] = []
@@ -104,13 +113,18 @@ class RecordingRequestOnce:
         item = self._responses.pop(0)
         if isinstance(item, BaseException):
             raise item
-        return item
+        return TransportResponse(
+            status=item.status,
+            headers=item.headers,
+            body=item.body,
+            final_target=target,
+        )
 
 
 class PatchRequestOnce(Protocol):
     def __call__(
         self,
-        responses: Sequence[TransportResponse | BaseException],
+        responses: Sequence[_ScriptedResponse | BaseException],
     ) -> RecordingRequestOnce: ...
 
 
@@ -131,11 +145,11 @@ def _response(
     location_name: bytes = b"Location",
     body: bytes = b"",
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
-) -> TransportResponse:
+) -> _ScriptedResponse:
     headers: list[tuple[bytes, bytes]] = list(extra_headers)
     if location is not None:
         headers.append((location_name, location))
-    return TransportResponse(status=status, headers=tuple(headers), body=body)
+    return _ScriptedResponse(status=status, headers=tuple(headers), body=body)
 
 
 def _reject_socket_getaddrinfo(*args: object, **kwargs: object) -> None:
@@ -163,7 +177,7 @@ def patch_request_once(monkeypatch: pytest.MonkeyPatch) -> PatchRequestOnce:
     """Install a RecordingRequestOnce in place of the real request_once."""
 
     def install(
-        responses: Sequence[TransportResponse | BaseException],
+        responses: Sequence[_ScriptedResponse | BaseException],
     ) -> RecordingRequestOnce:
         recorded = RecordingRequestOnce(responses)
         monkeypatch.setattr(
@@ -229,6 +243,9 @@ def test_non_redirect_response_returns_immediately(
 
     assert response.status == 200
     assert response.body == b"ok"
+    assert response.final_target is recorded.calls[0].target
+    assert response.final_target == target
+    assert response.final_target.url == "https://example.com/start"
     assert resolver.calls == [("example.com", 443)]
     assert len(recorded.calls) == 1
     assert recorded.calls[0].target.url == "https://example.com/start"
@@ -260,6 +277,10 @@ def test_relative_redirect_revalidates_and_resolves_again(
 
     assert response.status == 200
     assert response.body == b"done"
+    assert response.final_target is recorded.calls[-1].target
+    assert response.final_target == nxt
+    assert response.final_target.url == "https://example.com/next"
+    assert response.final_target != start
     assert resolver.calls == [
         ("example.com", 443),
         ("example.com", 443),
@@ -294,6 +315,9 @@ def test_absolute_same_origin_redirect_succeeds(
         "https://example.com/start",
         "https://example.com/dashboard",
     ]
+    assert response.final_target is recorded.calls[-1].target
+    assert response.final_target.url == "https://example.com/dashboard"
+    assert response.final_target != start
     assert resolver.calls == [("example.com", 443), ("example.com", 443)]
 
 
@@ -325,6 +349,10 @@ def test_allowlisted_cross_origin_redirect_uses_new_validated_ip(
     )
 
     assert response.status == 200
+    assert response.final_target is recorded.calls[-1].target
+    assert response.final_target.url == "https://api.example.com/v1"
+    assert response.final_target.host == "api.example.com"
+    assert response.final_target != start
     assert resolver.calls == [
         ("example.com", 443),
         ("api.example.com", 443),
@@ -334,6 +362,46 @@ def test_allowlisted_cross_origin_redirect_uses_new_validated_ip(
     assert recorded.calls[1].pinned_ip != recorded.calls[0].pinned_ip
     assert recorded.calls[1].target.url == "https://api.example.com/v1"
     assert recorded.calls[1].target.host == "api.example.com"
+
+
+def test_allowlisted_cross_origin_redirect_reports_destination_as_final_target(
+    patch_request_once: PatchRequestOnce,
+) -> None:
+    start = parse_target_url("https://app.test/start")
+    final = parse_target_url("https://api.test/final")
+    allowed = _allowed("https://app.test/", "https://api.test/")
+    resolver = RecordingResolver(
+        {
+            "app.test": (_EXAMPLE_IP,),
+            "api.test": (_API_IP,),
+        }
+    )
+    recorded = patch_request_once(
+        [
+            _response(302, location=b"https://api.test/final"),
+            _response(200, body=b"ok"),
+        ]
+    )
+
+    response = _run(
+        start.url,
+        allowed_origins=allowed,
+        policy=AddressPolicy.PUBLIC,
+        resolver=resolver,
+        limits=_limits(),
+        max_redirects=5,
+    )
+
+    assert response.status == 200
+    assert response.body == b"ok"
+    assert response.final_target is recorded.calls[-1].target
+    assert response.final_target == final
+    assert response.final_target.host == "api.test"
+    assert response.final_target.url == "https://api.test/final"
+    assert response.final_target != start
+    assert recorded.calls[0].pinned_ip == _EXAMPLE_IP
+    assert recorded.calls[1].pinned_ip == _API_IP
+    assert resolver.calls == [("app.test", 443), ("api.test", 443)]
 
 
 def test_redirect_to_non_allowlisted_origin_fails_before_second_request(
@@ -470,6 +538,9 @@ def test_exactly_max_redirects_may_be_followed(
 
     assert response.status == 200
     assert response.body == b"final"
+    assert response.final_target is recorded.calls[-1].target
+    assert response.final_target.url == "https://example.com/c"
+    assert response.final_target != start
     assert [call.target.url for call in recorded.calls] == [
         "https://example.com/a",
         "https://example.com/b",
@@ -580,6 +651,8 @@ def test_redirect_status_without_location_is_returned_normally(
 
     assert response.status == 302
     assert response.body == b"no location"
+    assert response.final_target is recorded.calls[0].target
+    assert response.final_target == start
     assert len(recorded.calls) == 1
     assert resolver.calls == [("example.com", 443)]
 
@@ -624,13 +697,12 @@ def test_multiple_location_headers_raise_invalid_redirect(
     resolver = RecordingResolver({"example.com": (_EXAMPLE_IP,)})
     recorded = patch_request_once(
         [
-            TransportResponse(
-                status=302,
-                headers=(
+            _response(
+                302,
+                extra_headers=(
                     (b"Location", b"/first"),
                     (b"LOCATION", b"/second"),
                 ),
-                body=b"",
             )
         ]
     )

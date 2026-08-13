@@ -45,6 +45,7 @@ class TransportResponse:
     status: int
     headers: tuple[tuple[bytes, bytes], ...]
     body: bytes
+    final_target: TargetUrl
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +189,7 @@ async def request_once(
                 status=response.status,
                 headers=tuple(response.headers),
                 body=bytes(body),
+                final_target=target,
             )
 
 

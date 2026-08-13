@@ -4,7 +4,7 @@ import math
 import socket
 import ssl
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, dataclass, fields
 from typing import Protocol
 
 import anyio
@@ -255,6 +255,31 @@ def recording_http(monkeypatch: pytest.MonkeyPatch) -> RecordingHttpFactory:
 
 def test_response_too_large_code_is_stable() -> None:
     assert TransportErrorCode.RESPONSE_TOO_LARGE.value == "response_too_large"
+
+
+def test_transport_response_fields_are_status_headers_body_and_final_target() -> None:
+    names = tuple(field.name for field in fields(TransportResponse))
+    assert names == ("status", "headers", "body", "final_target")
+
+
+def test_transport_response_is_frozen_and_slotted() -> None:
+    target = parse_target_url("https://example.com/")
+    response = TransportResponse(
+        status=200,
+        headers=((b"Content-Type", b"text/plain"),),
+        body=b"ok",
+        final_target=target,
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        response.status = 500  # type: ignore[misc]
+
+    with pytest.raises(FrozenInstanceError):
+        response.final_target = parse_target_url("https://evil.test/")  # type: ignore[misc]
+
+    assert response.status == 200
+    assert response.final_target is target
+    assert not hasattr(response, "__dict__")
 
 
 def test_request_limits_are_immutable() -> None:
@@ -508,7 +533,65 @@ def test_response_preserves_status_raw_headers_and_body(
     assert (b"X-Test", b"Ok") in response.headers
     assert (b"Content-Type", b"application/octet-stream") in response.headers
     assert response.body == body
+    assert response.final_target is target
     assert recorded.stream.closed
+
+
+def test_request_once_reports_original_normalized_target_as_final_target(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recorded = recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("http://example.com/start")
+
+    response = asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(),
+        )
+    )
+
+    assert response.final_target == target
+    assert response.final_target.url == "http://example.com/start"
+    assert recorded.stream.closed
+
+
+def test_request_once_preserves_final_target_identity(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("http://example.com/start")
+
+    response = asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(),
+        )
+    )
+
+    assert response.final_target is target
+
+
+def test_request_once_reports_already_normalized_supplied_target(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("HTTPS://EXAMPLE.COM:443/path#section")
+
+    response = asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(),
+        )
+    )
+
+    assert target.url == "https://example.com/path"
+    assert response.final_target is target
+    assert response.final_target.url == "https://example.com/path"
+    assert response.final_target.host == "example.com"
+    assert response.final_target.port == 443
 
 
 def test_body_exactly_at_max_body_bytes_is_accepted(
@@ -614,6 +697,8 @@ def test_302_response_is_returned_and_not_followed(
 
     assert response.status == 302
     assert (b"Location", b"http://example.com/other") in response.headers
+    assert response.final_target is target
+    assert response.final_target.url == "http://example.com/"
     assert recorded.inner.connect_tcp_calls == [
         ConnectTcpCall(host=_PINNED_IPV4, port=80)
     ]
