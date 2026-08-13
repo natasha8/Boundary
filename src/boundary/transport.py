@@ -1,9 +1,36 @@
-"""Pinned HTTPCore backend that dials a prevalidated IP."""
+"""Pinned HTTPCore backend and single-request HTTP transport."""
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
+from dataclasses import dataclass
+from enum import StrEnum
 from ipaddress import ip_address
 
 import httpcore
+
+from boundary.scope import TargetUrl
+
+
+class TransportErrorCode(StrEnum):
+    """Stable machine-readable codes for transport failures."""
+
+    RESPONSE_TOO_LARGE = "response_too_large"
+
+
+class TransportError(RuntimeError):
+    """Raised when a transport request fails a safety limit."""
+
+    def __init__(self, code: TransportErrorCode, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class TransportResponse:
+    """Immutable HTTP response from a single transport request."""
+
+    status: int
+    headers: tuple[tuple[bytes, bytes], ...]
+    body: bytes
 
 
 class PinnedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -45,3 +72,60 @@ class PinnedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
 
     async def sleep(self, seconds: float) -> None:
         await self._inner.sleep(seconds)
+
+
+async def request_once(
+    target: TargetUrl,
+    pinned_ip: str,
+    *,
+    method: str = "GET",
+    headers: Collection[tuple[bytes, bytes]] = (),
+    max_body_bytes: int,
+) -> TransportResponse:
+    """Send one HTTP request through a pinned connection without following redirects."""
+    if max_body_bytes < 0:
+        raise ValueError("Maximum response body size cannot be negative.")
+
+    inner = httpcore.AnyIOBackend()
+    backend = PinnedAsyncNetworkBackend(pinned_ip, inner)
+
+    async with httpcore.AsyncConnectionPool(
+        network_backend=backend,
+        max_connections=1,
+        max_keepalive_connections=0,
+        http1=True,
+        http2=False,
+        retries=0,
+        uds=None,
+    ) as pool:
+        async with pool.stream(
+            method,
+            target.url,
+            headers=tuple(headers),
+        ) as response:
+            for name, value in response.headers:
+                if name.lower() != b"content-length":
+                    continue
+                if value.isdigit() and int(value) > max_body_bytes:
+                    raise TransportError(
+                        TransportErrorCode.RESPONSE_TOO_LARGE,
+                        "Response body exceeds the configured limit.",
+                    )
+                break
+
+            body = bytearray()
+
+            async for chunk in response.aiter_stream():
+                if len(body) + len(chunk) > max_body_bytes:
+                    raise TransportError(
+                        TransportErrorCode.RESPONSE_TOO_LARGE,
+                        "Response body exceeds the configured limit.",
+                    )
+
+                body.extend(chunk)
+
+            return TransportResponse(
+                status=response.status,
+                headers=tuple(response.headers),
+                body=bytes(body),
+            )
