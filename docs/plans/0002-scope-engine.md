@@ -84,7 +84,7 @@ Implementation constraints for Slice C:
 - do not resolve hostnames;
 - do not add a class or service.
 
-### Slice D: Redirect validation — in progress
+### Slice D: Redirect validation — complete
 
 Slice D resolves `Location` values against the current request URL and
 enforces exact origin allowlisting. It does not perform DNS resolution,
@@ -114,6 +114,34 @@ limits or loop detection.
   for a valid redirect URL outside the origin allowlist;
 - do not introduce a redirect-specific exception or error enum unless tests
   demonstrate a concrete need.
+
+### Slice E: Controlled DNS resolution — in progress
+
+Slice E resolves a hostname through an injected async resolver and validates
+every returned address against the selected `AddressPolicy`. It does not
+perform concrete socket DNS lookups, caching, retries, timeouts, or DNS
+rebinding protection.
+
+- expose `AddressResolver` as a minimal `typing.Protocol` with
+  `async resolve(self, host: str, port: int) -> Collection[str]`;
+- expose `async resolve_allowed_addresses(host, port, policy, resolver)` that
+  returns a `tuple[str, ...]`;
+- call `resolver.resolve(host, port)` exactly once;
+- validate every returned address with `require_allowed_address()`;
+- return normalized textual IP addresses using `ipaddress.ip_address()`
+  canonical form;
+- remove duplicate addresses while preserving first-seen order;
+- allow results only when every returned address passes the selected policy;
+- reject the entire result if any address is invalid or disallowed;
+- reject an empty resolver result with `ScopeErrorCode.NO_RESOLVED_ADDRESSES`
+  (`"no_resolved_addresses"`);
+- preserve `INVALID_IP_ADDRESS` and `ADDRESS_NOT_ALLOWED` for resolver output
+  that fails existing address validation;
+- do not silently discard invalid or disallowed addresses;
+- do not create a DNS service class;
+- do not use `socket` directly in this slice;
+- unit tests must inject a fake resolver and must not perform real DNS or
+  HTTP.
 
 ## Slice A non-goals
 
@@ -222,3 +250,31 @@ Slice D will not:
   `ScopeErrorCode.ORIGIN_NOT_ALLOWED`;
 - tests cover success, failure and boundary cases without DNS or network
   activity.
+
+## Slice E non-goals
+
+Slice E will not:
+
+- perform concrete DNS lookups via `socket` or system resolvers;
+- implement DNS rebinding protection;
+- add caching, retries or timeouts;
+- create a DNS service class;
+- perform HTTP requests;
+- catch and swallow `ScopeValidationError` from address validation.
+
+DNS rebinding protection, caching, timeouts and concrete socket resolution
+remain future transport-level work.
+
+## Slice E acceptance criteria
+
+- `AddressResolver` is a structural Protocol with an async `resolve` method;
+- `resolve_allowed_addresses` calls the resolver once and returns a tuple of
+  canonical textual addresses;
+- duplicates and equivalent IPv6 textual forms collapse while preserving
+  first-seen order;
+- empty resolver output raises `ScopeValidationError` with
+  `ScopeErrorCode.NO_RESOLVED_ADDRESSES`;
+- invalid resolver output preserves `INVALID_IP_ADDRESS`;
+- disallowed resolver output preserves `ADDRESS_NOT_ALLOWED`;
+- PUBLIC and LOCAL_LAB policies are both covered by tests;
+- tests use an injected fake resolver with no network or DNS activity.

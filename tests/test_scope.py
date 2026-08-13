@@ -1,3 +1,7 @@
+import asyncio
+from collections.abc import Collection
+from ipaddress import ip_address
+
 import pytest
 
 from boundary.scope import (
@@ -10,8 +14,25 @@ from boundary.scope import (
     parse_target_url,
     require_allowed_address,
     require_allowed_origin,
+    resolve_allowed_addresses,
     resolve_allowed_redirect,
 )
+
+
+class FakeAddressResolver:
+    """Test double that returns predefined addresses without network I/O."""
+
+    def __init__(self, addresses: Collection[str]) -> None:
+        self._addresses = list(addresses)
+        self.calls = 0
+        self.received_host: str | None = None
+        self.received_port: int | None = None
+
+    async def resolve(self, host: str, port: int) -> Collection[str]:
+        self.calls += 1
+        self.received_host = host
+        self.received_port = port
+        return list(self._addresses)
 
 
 @pytest.mark.parametrize(
@@ -318,6 +339,7 @@ def test_address_policy_values() -> None:
 def test_scope_error_code_includes_address_policy_codes() -> None:
     assert ScopeErrorCode.INVALID_IP_ADDRESS.value == "invalid_ip_address"
     assert ScopeErrorCode.ADDRESS_NOT_ALLOWED.value == "address_not_allowed"
+    assert ScopeErrorCode.NO_RESOLVED_ADDRESSES.value == "no_resolved_addresses"
 
 
 @pytest.mark.parametrize(
@@ -661,3 +683,121 @@ def test_resolve_allowed_redirect_preserves_encoding_and_urljoin_resolution(
     assert result.path == expected_path
     assert result.query == expected_query
     assert result.url == expected_url
+
+
+@pytest.mark.parametrize(
+    ("addresses", "expected"),
+    [
+        (
+            ["8.8.8.8", "1.1.1.1"],
+            ("8.8.8.8", "1.1.1.1"),
+        ),
+        (
+            ["8.8.8.8", "8.8.8.8"],
+            ("8.8.8.8",),
+        ),
+        (
+            [
+                "2606:4700:4700:0:0:0:0:1111",
+                "2606:4700:4700::1111",
+            ],
+            ("2606:4700:4700::1111",),
+        ),
+    ],
+)
+def test_resolve_allowed_addresses_accepts_public_results(
+    addresses: list[str],
+    expected: tuple[str, ...],
+) -> None:
+    resolver = FakeAddressResolver(addresses)
+
+    result = asyncio.run(
+        resolve_allowed_addresses(
+            "example.com",
+            443,
+            AddressPolicy.PUBLIC,
+            resolver,
+        )
+    )
+
+    assert result == expected
+    assert all(item == str(ip_address(item)) for item in result)
+    assert resolver.calls == 1
+    assert resolver.received_host == "example.com"
+    assert resolver.received_port == 443
+
+
+@pytest.mark.parametrize(
+    ("addresses", "expected_code"),
+    [
+        (
+            ["8.8.8.8", "127.0.0.1"],
+            ScopeErrorCode.ADDRESS_NOT_ALLOWED,
+        ),
+        (
+            ["192.168.1.10"],
+            ScopeErrorCode.ADDRESS_NOT_ALLOWED,
+        ),
+        (
+            ["invalid-ip"],
+            ScopeErrorCode.INVALID_IP_ADDRESS,
+        ),
+        (
+            [],
+            ScopeErrorCode.NO_RESOLVED_ADDRESSES,
+        ),
+    ],
+)
+def test_resolve_allowed_addresses_rejects_public_results(
+    addresses: list[str],
+    expected_code: ScopeErrorCode,
+) -> None:
+    resolver = FakeAddressResolver(addresses)
+
+    with pytest.raises(ScopeValidationError) as error:
+        asyncio.run(
+            resolve_allowed_addresses(
+                "example.com",
+                443,
+                AddressPolicy.PUBLIC,
+                resolver,
+            )
+        )
+
+    assert error.value.code is expected_code
+    assert resolver.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("addresses", "expected"),
+    [
+        (
+            ["127.0.0.1", "192.168.1.10"],
+            ("127.0.0.1", "192.168.1.10"),
+        ),
+        (
+            ["::1", "fc00::1"],
+            ("::1", "fc00::1"),
+        ),
+    ],
+)
+def test_resolve_allowed_addresses_accepts_local_lab_results(
+    addresses: list[str],
+    expected: tuple[str, ...],
+) -> None:
+    resolver = FakeAddressResolver(addresses)
+
+    result = asyncio.run(
+        resolve_allowed_addresses(
+            "localhost",
+            8080,
+            AddressPolicy.LOCAL_LAB,
+            resolver,
+        )
+    )
+
+    assert result == expected
+    assert all(item == str(ip_address(item)) for item in result)
+    assert resolver.calls == 1
+    assert resolver.received_host == "localhost"
+    assert resolver.received_port == 8080
