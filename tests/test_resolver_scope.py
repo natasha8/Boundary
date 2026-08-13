@@ -65,16 +65,19 @@ def _reject_socket_getaddrinfo(*args: object, **kwargs: object) -> None:
     raise AssertionError("socket.getaddrinfo must not be called")
 
 
-@pytest.fixture(autouse=True)
-def fake_loop(monkeypatch: pytest.MonkeyPatch) -> FakeEventLoop:
+@pytest.fixture(autouse=True, name="fake_loop")
+def _fake_loop(monkeypatch: pytest.MonkeyPatch) -> FakeEventLoop:
+    """Patch the event loop so SystemAddressResolver never performs DNS."""
     loop = FakeEventLoop()
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
     monkeypatch.setattr(socket, "getaddrinfo", _reject_socket_getaddrinfo)
     return loop
 
 
-@pytest.fixture(autouse=True)
-def unfiltered_addresses(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+@pytest.fixture(autouse=True, name="unfiltered_addresses")
+def _unfiltered_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, ...]]:
     """Record raw SystemAddressResolver output before policy enforcement."""
     observed: list[tuple[str, ...]] = []
     original = SystemAddressResolver.resolve
@@ -108,6 +111,7 @@ def test_public_accepts_mixed_public_ipv4_and_ipv6(
     fake_loop: FakeEventLoop,
     unfiltered_addresses: list[tuple[str, ...]],
 ) -> None:
+    """PUBLIC accepts mixed public IPv4 and IPv6 from getaddrinfo."""
     fake_loop.results = [
         _ipv4_addrinfo("8.8.8.8", _PORT),
         _ipv6_addrinfo("2606:4700:4700::1111", _PORT),
@@ -124,6 +128,7 @@ def test_composition_canonicalizes_and_deduplicates_equivalent_ipv6(
     fake_loop: FakeEventLoop,
     unfiltered_addresses: list[tuple[str, ...]],
 ) -> None:
+    """Equivalent IPv6 forms collapse to one canonical address."""
     fake_loop.results = [
         _ipv6_addrinfo("2606:4700:4700:0:0:0:0:1111", _PORT),
         _ipv6_addrinfo("2606:4700:4700::1111", _PORT),
@@ -141,6 +146,7 @@ def test_public_rejects_entire_result_when_one_address_is_private(
     fake_loop: FakeEventLoop,
     unfiltered_addresses: list[tuple[str, ...]],
 ) -> None:
+    """PUBLIC rejects the entire result when any address is private."""
     fake_loop.results = [
         _ipv4_addrinfo("8.8.8.8", _PORT),
         _ipv4_addrinfo("192.168.1.10", _PORT),
@@ -157,6 +163,7 @@ def test_local_lab_accepts_loopback_and_private_addresses(
     fake_loop: FakeEventLoop,
     unfiltered_addresses: list[tuple[str, ...]],
 ) -> None:
+    """LOCAL_LAB accepts loopback and private resolver results."""
     fake_loop.results = [
         _ipv4_addrinfo("127.0.0.1", _PORT),
         _ipv4_addrinfo("192.168.1.10", _PORT),
@@ -173,6 +180,7 @@ def test_empty_getaddrinfo_result_raises_no_resolved_addresses(
     fake_loop: FakeEventLoop,
     unfiltered_addresses: list[tuple[str, ...]],
 ) -> None:
+    """Empty getaddrinfo results raise NO_RESOLVED_ADDRESSES."""
     fake_loop.results = []
 
     with pytest.raises(ScopeValidationError) as error:
