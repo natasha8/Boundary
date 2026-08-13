@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
+import math
 import socket
 import ssl
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from dataclasses import FrozenInstanceError, dataclass
 from typing import Protocol
 
 import anyio
@@ -12,6 +14,7 @@ import pytest
 from boundary.scope import parse_target_url
 from boundary.transport import (
     PinnedAsyncNetworkBackend,
+    RequestLimits,
     TransportError,
     TransportErrorCode,
     TransportResponse,
@@ -28,6 +31,7 @@ class ConnectTcpCall:
 
     host: str
     port: int
+    timeout: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +39,7 @@ class StartTlsCall:
     """One recorded start_tls invocation."""
 
     server_hostname: str | None
+    timeout: float | None = None
 
 
 class FakeHttpStream(httpcore.AsyncNetworkStream):
@@ -52,6 +57,8 @@ class FakeHttpStream(httpcore.AsyncNetworkStream):
         self._read_error = read_error
         self._read_chunk_size = read_chunk_size
         self.start_tls_calls: list[StartTlsCall] = []
+        self.read_timeouts: list[float | None] = []
+        self.write_timeouts: list[float | None] = []
         self.aclose_calls = 0
         self.bytes_delivered = 0
 
@@ -71,6 +78,7 @@ class FakeHttpStream(httpcore.AsyncNetworkStream):
         return bytes(self._buffer)
 
     async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        self.read_timeouts.append(timeout)
         if not self._buffer:
             if self._read_error is not None:
                 raise self._read_error
@@ -84,6 +92,7 @@ class FakeHttpStream(httpcore.AsyncNetworkStream):
         return chunk
 
     async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self.write_timeouts.append(timeout)
         self._writes.extend(buffer)
 
     async def aclose(self) -> None:
@@ -95,7 +104,9 @@ class FakeHttpStream(httpcore.AsyncNetworkStream):
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        self.start_tls_calls.append(StartTlsCall(server_hostname=server_hostname))
+        self.start_tls_calls.append(
+            StartTlsCall(server_hostname=server_hostname, timeout=timeout)
+        )
         return self
 
 
@@ -114,7 +125,9 @@ class RecordingBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        self.connect_tcp_calls.append(ConnectTcpCall(host=host, port=port))
+        self.connect_tcp_calls.append(
+            ConnectTcpCall(host=host, port=port, timeout=timeout)
+        )
         return self.stream
 
     async def connect_unix_socket(
@@ -145,6 +158,23 @@ class RecordingHttpFactory(Protocol):
         read_error: BaseException | None = None,
         read_chunk_size: int | None = None,
     ) -> RecordingHttp: ...
+
+
+def _limits(
+    *,
+    max_body_bytes: int = 1024,
+    connect_timeout: float | None = None,
+    read_timeout: float | None = None,
+    write_timeout: float | None = None,
+    pool_timeout: float | None = None,
+) -> RequestLimits:
+    return RequestLimits(
+        max_body_bytes=max_body_bytes,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        write_timeout=write_timeout,
+        pool_timeout=pool_timeout,
+    )
 
 
 def _http_response(
@@ -227,6 +257,143 @@ def test_response_too_large_code_is_stable() -> None:
     assert TransportErrorCode.RESPONSE_TOO_LARGE.value == "response_too_large"
 
 
+def test_request_limits_are_immutable() -> None:
+    limits = _limits(max_body_bytes=8, connect_timeout=1.0)
+
+    with pytest.raises(FrozenInstanceError):
+        limits.max_body_bytes = 16  # type: ignore[misc]
+
+
+def test_request_limits_accepts_finite_timeouts() -> None:
+    limits = RequestLimits(
+        max_body_bytes=512,
+        connect_timeout=1.25,
+        read_timeout=2.5,
+        write_timeout=3.75,
+        pool_timeout=4.0,
+    )
+
+    assert limits.max_body_bytes == 512
+    assert limits.connect_timeout == 1.25
+    assert limits.read_timeout == 2.5
+    assert limits.write_timeout == 3.75
+    assert limits.pool_timeout == 4.0
+
+
+def test_request_limits_accepts_none_timeouts() -> None:
+    limits = RequestLimits(
+        max_body_bytes=0,
+        connect_timeout=None,
+        read_timeout=None,
+        write_timeout=None,
+        pool_timeout=None,
+    )
+
+    assert limits.connect_timeout is None
+    assert limits.read_timeout is None
+    assert limits.write_timeout is None
+    assert limits.pool_timeout is None
+
+
+def test_request_limits_accepts_zero_timeouts() -> None:
+    limits = RequestLimits(
+        max_body_bytes=1,
+        connect_timeout=0.0,
+        read_timeout=0.0,
+        write_timeout=0.0,
+        pool_timeout=0.0,
+    )
+
+    assert limits.connect_timeout == 0.0
+    assert limits.read_timeout == 0.0
+    assert limits.write_timeout == 0.0
+    assert limits.pool_timeout == 0.0
+
+
+def test_negative_max_body_bytes_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        _limits(max_body_bytes=-1)
+
+
+@pytest.mark.parametrize(
+    ("connect_timeout", "read_timeout", "write_timeout", "pool_timeout"),
+    [
+        (-0.1, None, None, None),
+        (None, -1.0, None, None),
+        (None, None, -2.5, None),
+        (None, None, None, -3.0),
+    ],
+)
+def test_negative_timeout_is_rejected(
+    connect_timeout: float | None,
+    read_timeout: float | None,
+    write_timeout: float | None,
+    pool_timeout: float | None,
+) -> None:
+    with pytest.raises(ValueError):
+        RequestLimits(
+            max_body_bytes=1024,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            pool_timeout=pool_timeout,
+        )
+
+
+@pytest.mark.parametrize(
+    ("connect_timeout", "read_timeout", "write_timeout", "pool_timeout"),
+    [
+        (math.nan, None, None, None),
+        (None, math.nan, None, None),
+        (None, None, math.nan, None),
+        (None, None, None, math.nan),
+    ],
+)
+def test_nan_timeout_is_rejected(
+    connect_timeout: float | None,
+    read_timeout: float | None,
+    write_timeout: float | None,
+    pool_timeout: float | None,
+) -> None:
+    with pytest.raises(ValueError):
+        RequestLimits(
+            max_body_bytes=1024,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            pool_timeout=pool_timeout,
+        )
+
+
+@pytest.mark.parametrize(
+    ("connect_timeout", "read_timeout", "write_timeout", "pool_timeout"),
+    [
+        (math.inf, None, None, None),
+        (None, math.inf, None, None),
+        (None, None, math.inf, None),
+        (None, None, None, math.inf),
+        (-math.inf, None, None, None),
+        (None, -math.inf, None, None),
+        (None, None, -math.inf, None),
+        (None, None, None, -math.inf),
+    ],
+)
+def test_infinite_timeout_is_rejected(
+    connect_timeout: float | None,
+    read_timeout: float | None,
+    write_timeout: float | None,
+    pool_timeout: float | None,
+) -> None:
+    with pytest.raises(ValueError):
+        RequestLimits(
+            max_body_bytes=1024,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            pool_timeout=pool_timeout,
+        )
+
+
 def test_http_tcp_connects_to_pinned_ip_not_hostname(
     recording_http: RecordingHttpFactory,
 ) -> None:
@@ -237,7 +404,7 @@ def test_http_tcp_connects_to_pinned_ip_not_hostname(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=1024,
+            limits=_limits(),
         )
     )
 
@@ -260,7 +427,7 @@ def test_http_request_host_header_uses_target_host_not_pinned_ip(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=1024,
+            limits=_limits(),
         )
     )
 
@@ -280,7 +447,7 @@ def test_https_start_tls_uses_target_host_sni_and_pinned_tcp(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=1024,
+            limits=_limits(),
         )
     )
 
@@ -302,7 +469,7 @@ def test_non_default_port_is_preserved_on_tcp_and_host_header(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=1024,
+            limits=_limits(),
         )
     )
 
@@ -332,7 +499,7 @@ def test_response_preserves_status_raw_headers_and_body(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=1024,
+            limits=_limits(),
         )
     )
 
@@ -355,7 +522,7 @@ def test_body_exactly_at_max_body_bytes_is_accepted(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=len(body),
+            limits=_limits(max_body_bytes=len(body)),
         )
     )
 
@@ -367,7 +534,6 @@ def test_body_exceeding_max_body_bytes_stops_reading_and_closes(
     recording_http: RecordingHttpFactory,
 ) -> None:
     body = b"abcdefghij"
-    max_body_bytes = 3
     recorded = recording_http(
         response=_http_response(body=body),
         read_chunk_size=1,
@@ -379,7 +545,7 @@ def test_body_exceeding_max_body_bytes_stops_reading_and_closes(
             request_once(
                 target,
                 _PINNED_IPV4,
-                max_body_bytes=max_body_bytes,
+                limits=_limits(max_body_bytes=3),
             )
         )
 
@@ -398,7 +564,7 @@ def test_zero_max_body_bytes_accepts_empty_body(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=0,
+            limits=_limits(max_body_bytes=0),
         )
     )
 
@@ -417,31 +583,12 @@ def test_zero_max_body_bytes_rejects_any_response_byte(
             request_once(
                 target,
                 _PINNED_IPV4,
-                max_body_bytes=0,
+                limits=_limits(max_body_bytes=0),
             )
         )
 
     assert caught.value.code is TransportErrorCode.RESPONSE_TOO_LARGE
     assert recorded.stream.closed
-
-
-def test_negative_max_body_bytes_is_rejected_before_connect(
-    recording_http: RecordingHttpFactory,
-) -> None:
-    recorded = recording_http(response=_http_response(body=b"ok"))
-    target = parse_target_url("http://example.com/")
-
-    with pytest.raises(ValueError):
-        asyncio.run(
-            request_once(
-                target,
-                _PINNED_IPV4,
-                max_body_bytes=-1,
-            )
-        )
-
-    assert recorded.inner.connect_tcp_calls == []
-    assert recorded.stream.request_bytes == b""
 
 
 def test_302_response_is_returned_and_not_followed(
@@ -461,7 +608,7 @@ def test_302_response_is_returned_and_not_followed(
         request_once(
             target,
             _PINNED_IPV4,
-            max_body_bytes=1024,
+            limits=_limits(),
         )
     )
 
@@ -491,9 +638,166 @@ def test_stream_read_exception_propagates_and_closes_resources(
             request_once(
                 target,
                 _PINNED_IPV4,
-                max_body_bytes=1024,
+                limits=_limits(),
             )
         )
 
     assert caught.value is error
+    assert recorded.stream.closed
+
+
+def test_connect_timeout_is_passed_to_connect_tcp(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recorded = recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("http://example.com/")
+
+    asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(
+                connect_timeout=1.5,
+                read_timeout=2.5,
+                write_timeout=3.5,
+                pool_timeout=4.5,
+            ),
+        )
+    )
+
+    assert recorded.inner.connect_tcp_calls == [
+        ConnectTcpCall(host=_PINNED_IPV4, port=80, timeout=1.5)
+    ]
+
+
+def test_read_timeout_is_passed_to_stream_read(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recorded = recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("http://example.com/")
+
+    asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(
+                connect_timeout=1.5,
+                read_timeout=2.5,
+                write_timeout=3.5,
+                pool_timeout=4.5,
+            ),
+        )
+    )
+
+    assert recorded.stream.read_timeouts
+    assert recorded.stream.read_timeouts == [2.5] * len(recorded.stream.read_timeouts)
+
+
+def test_write_timeout_is_passed_to_stream_write(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recorded = recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("http://example.com/")
+
+    asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(
+                connect_timeout=1.5,
+                read_timeout=2.5,
+                write_timeout=3.5,
+                pool_timeout=4.5,
+            ),
+        )
+    )
+
+    assert recorded.stream.write_timeouts
+    assert recorded.stream.write_timeouts == [3.5] * len(recorded.stream.write_timeouts)
+
+
+def test_https_start_tls_receives_connect_timeout(
+    recording_http: RecordingHttpFactory,
+) -> None:
+    recorded = recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("https://example.com/")
+
+    asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=_limits(
+                connect_timeout=1.5,
+                read_timeout=2.5,
+                write_timeout=3.5,
+                pool_timeout=4.5,
+            ),
+        )
+    )
+
+    assert recorded.stream.start_tls_calls == [
+        StartTlsCall(server_hostname=_HOSTNAME, timeout=1.5)
+    ]
+
+
+def test_request_passes_httpcore_timeout_extension(
+    recording_http: RecordingHttpFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = recording_http(response=_http_response(body=b"ok"))
+    target = parse_target_url("http://example.com/")
+    captured: list[object] = []
+    original_stream = httpcore.AsyncConnectionPool.stream
+    limits = _limits(
+        connect_timeout=1.5,
+        read_timeout=2.5,
+        write_timeout=3.5,
+        pool_timeout=4.5,
+    )
+
+    @contextlib.asynccontextmanager
+    async def capture_stream(
+        self: httpcore.AsyncConnectionPool,
+        method: bytes | str,
+        url: httpcore.URL | bytes | str,
+        *,
+        headers: (
+            Sequence[tuple[bytes | str, bytes | str]]
+            | Mapping[bytes | str, bytes | str]
+            | None
+        ) = None,
+        content: bytes | None = None,
+        extensions: dict[str, object] | None = None,
+    ) -> AsyncIterator[httpcore.Response]:
+        captured.append(extensions)
+        async with original_stream(
+            self,
+            method,
+            url,
+            headers=headers,
+            content=content,
+            extensions=extensions,
+        ) as response:
+            yield response
+
+    monkeypatch.setattr(httpcore.AsyncConnectionPool, "stream", capture_stream)
+
+    asyncio.run(
+        request_once(
+            target,
+            _PINNED_IPV4,
+            limits=limits,
+        )
+    )
+
+    assert captured == [
+        {
+            "timeout": {
+                "connect": 1.5,
+                "read": 2.5,
+                "write": 3.5,
+                "pool": 4.5,
+            }
+        }
+    ]
     assert recorded.stream.closed

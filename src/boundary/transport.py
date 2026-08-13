@@ -1,5 +1,6 @@
 """Pinned HTTPCore backend and single-request HTTP transport."""
 
+import math
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -31,6 +32,32 @@ class TransportResponse:
     status: int
     headers: tuple[tuple[bytes, bytes], ...]
     body: bytes
+
+
+def _validate_timeout(name: str, value: float | None) -> None:
+    if value is None:
+        return
+    if value < 0 or not math.isfinite(value):
+        raise ValueError(f"{name} timeout must be None, 0, or a positive finite float.")
+
+
+@dataclass(frozen=True, slots=True)
+class RequestLimits:
+    """Validated size and timeout limits for a single transport request."""
+
+    max_body_bytes: int
+    connect_timeout: float | None
+    read_timeout: float | None
+    write_timeout: float | None
+    pool_timeout: float | None
+
+    def __post_init__(self) -> None:
+        if self.max_body_bytes < 0:
+            raise ValueError("Maximum response body size cannot be negative.")
+        _validate_timeout("connect", self.connect_timeout)
+        _validate_timeout("read", self.read_timeout)
+        _validate_timeout("write", self.write_timeout)
+        _validate_timeout("pool", self.pool_timeout)
 
 
 class PinnedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -80,14 +107,20 @@ async def request_once(
     *,
     method: str = "GET",
     headers: Collection[tuple[bytes, bytes]] = (),
-    max_body_bytes: int,
+    limits: RequestLimits,
 ) -> TransportResponse:
     """Send one HTTP request through a pinned connection without following redirects."""
-    if max_body_bytes < 0:
-        raise ValueError("Maximum response body size cannot be negative.")
-
     inner = httpcore.AnyIOBackend()
     backend = PinnedAsyncNetworkBackend(pinned_ip, inner)
+
+    extensions = {
+        "timeout": {
+            "connect": limits.connect_timeout,
+            "read": limits.read_timeout,
+            "write": limits.write_timeout,
+            "pool": limits.pool_timeout,
+        }
+    }
 
     async with httpcore.AsyncConnectionPool(
         network_backend=backend,
@@ -102,11 +135,12 @@ async def request_once(
             method,
             target.url,
             headers=tuple(headers),
+            extensions=extensions,
         ) as response:
             body = bytearray()
 
             async for chunk in response.aiter_stream():
-                if len(body) + len(chunk) > max_body_bytes:
+                if len(body) + len(chunk) > limits.max_body_bytes:
                     raise TransportError(
                         TransportErrorCode.RESPONSE_TOO_LARGE,
                         "Response body exceeds the configured limit.",
