@@ -1,4 +1,4 @@
-"""Pinned HTTPCore backend and single-request HTTP transport."""
+"""Pinned HTTPCore backend and controlled HTTP transport."""
 
 import math
 from collections.abc import Collection, Iterable
@@ -8,13 +8,26 @@ from ipaddress import ip_address
 
 import httpcore
 
-from boundary.scope import TargetUrl
+from boundary.scope import (
+    AddressPolicy,
+    AddressResolver,
+    Origin,
+    TargetUrl,
+    require_allowed_origin,
+    resolve_allowed_addresses,
+    resolve_allowed_redirect,
+)
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 class TransportErrorCode(StrEnum):
     """Stable machine-readable codes for transport failures."""
 
     RESPONSE_TOO_LARGE = "response_too_large"
+    TOO_MANY_REDIRECTS = "too_many_redirects"
+    REDIRECT_LOOP = "redirect_loop"
+    INVALID_REDIRECT = "invalid_redirect"
 
 
 class TransportError(RuntimeError):
@@ -153,3 +166,91 @@ async def request_once(
                 headers=tuple(response.headers),
                 body=bytes(body),
             )
+
+
+def _unique_location(headers: Collection[tuple[bytes, bytes]]) -> bytes | None:
+    """Return the unique Location value, or None if absent."""
+    locations = [value for name, value in headers if name.lower() == b"location"]
+    if not locations:
+        return None
+    if len(locations) > 1:
+        raise TransportError(
+            TransportErrorCode.INVALID_REDIRECT,
+            "Redirect response contains multiple Location headers.",
+        )
+    return locations[0]
+
+
+async def request_with_redirects(
+    target: TargetUrl,
+    *,
+    allowed_origins: Collection[Origin],
+    policy: AddressPolicy,
+    resolver: AddressResolver,
+    limits: RequestLimits,
+    max_redirects: int,
+    method: str = "GET",
+    headers: Collection[tuple[bytes, bytes]] = (),
+) -> TransportResponse:
+    """Send an HTTP request and follow in-scope redirects under hop and loop limits."""
+    if max_redirects < 0:
+        raise ValueError("max_redirects must be non-negative")
+
+    current = target
+    visited: set[str] = set()
+    redirects_followed = 0
+
+    while True:
+        require_allowed_origin(
+            current,
+            allowed_origins,
+        )
+
+        addresses = await resolve_allowed_addresses(
+            current.host,
+            current.port,
+            policy,
+            resolver,
+        )
+
+        pinned_ip = addresses[0]
+
+        visited.add(current.url)
+
+        response = await request_once(
+            current,
+            pinned_ip,
+            method=method,
+            headers=headers,
+            limits=limits,
+        )
+
+        if response.status not in _REDIRECT_STATUSES:
+            return response
+
+        location_value = _unique_location(response.headers)
+        if location_value is None:
+            return response
+
+        location = location_value.decode("ascii")
+
+        next_target = resolve_allowed_redirect(
+            current=current,
+            location=location,
+            allowed_origins=allowed_origins,
+        )
+
+        if redirects_followed >= max_redirects:
+            raise TransportError(
+                TransportErrorCode.TOO_MANY_REDIRECTS,
+                "Maximum redirect count exceeded.",
+            )
+
+        if next_target.url in visited:
+            raise TransportError(
+                TransportErrorCode.REDIRECT_LOOP,
+                "Redirect loop detected.",
+            )
+
+        redirects_followed += 1
+        current = next_target
