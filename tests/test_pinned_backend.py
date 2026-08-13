@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import httpcore
 import pytest
+
 from boundary.transport import PinnedAsyncNetworkBackend
 
 _PINNED_IPV4 = "93.184.216.34"

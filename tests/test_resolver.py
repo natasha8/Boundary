@@ -2,6 +2,7 @@ import asyncio
 import socket
 
 import pytest
+
 from boundary.resolver import SystemAddressResolver
 
 _HOST = "app.test"
