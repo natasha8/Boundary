@@ -47,6 +47,29 @@ class TransportResponse:
     body: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionReuseKey:
+    """Identity under which a keep-alive connection may be shared."""
+
+    scheme: str
+    host: str
+    port: int
+    pinned_ip: str
+
+
+def connection_reuse_key(
+    target: TargetUrl,
+    pinned_ip: str,
+) -> ConnectionReuseKey:
+    """Build a reuse key from a normalized target and a prevalidated pinned IP."""
+    return ConnectionReuseKey(
+        scheme=target.scheme,
+        host=target.host,
+        port=target.port,
+        pinned_ip=str(ip_address(pinned_ip)),
+    )
+
+
 def _validate_timeout(name: str, value: float | None) -> None:
     if value is None:
         return
