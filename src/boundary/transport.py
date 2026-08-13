@@ -103,16 +103,6 @@ async def request_once(
             target.url,
             headers=tuple(headers),
         ) as response:
-            for name, value in response.headers:
-                if name.lower() != b"content-length":
-                    continue
-                if value.isdigit() and int(value) > max_body_bytes:
-                    raise TransportError(
-                        TransportErrorCode.RESPONSE_TOO_LARGE,
-                        "Response body exceeds the configured limit.",
-                    )
-                break
-
             body = bytearray()
 
             async for chunk in response.aiter_stream():

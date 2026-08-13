@@ -363,11 +363,11 @@ def test_body_exactly_at_max_body_bytes_is_accepted(
     assert recorded.stream.closed
 
 
-def test_body_exceeding_max_body_bytes_by_one_byte_raises_and_closes(
+def test_body_exceeding_max_body_bytes_stops_reading_and_closes(
     recording_http: RecordingHttpFactory,
 ) -> None:
-    body = b"x" * 20
-    max_body_bytes = len(body) - 1
+    body = b"abcdefghij"
+    max_body_bytes = 3
     recorded = recording_http(
         response=_http_response(body=body),
         read_chunk_size=1,
@@ -384,7 +384,7 @@ def test_body_exceeding_max_body_bytes_by_one_byte_raises_and_closes(
         )
 
     assert caught.value.code is TransportErrorCode.RESPONSE_TOO_LARGE
-    assert recorded.stream.unread
+    assert recorded.stream.unread == b"efghij"
     assert recorded.stream.closed
 
 
