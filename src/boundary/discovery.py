@@ -1,9 +1,12 @@
-"""Discovery limits and the bounded frontier used by controlled traversal."""
+"""Discovery limits, frontier, HTML extraction, and breadth-first crawl."""
+
+from __future__ import annotations
 
 from collections import deque
-from collections.abc import Collection
+from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from typing import TYPE_CHECKING
 
 from boundary.scope import (
     Origin,
@@ -14,6 +17,10 @@ from boundary.scope import (
     parse_target_url,
     resolve_allowed_redirect,
 )
+
+if TYPE_CHECKING:
+    from boundary.scope import AddressPolicy, AddressResolver
+    from boundary.transport import RequestLimits, TransportResponse
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,3 +161,75 @@ def extract_html_references(
     parser.feed(text)
     parser.close()
     return tuple(parser.references)
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredPage:
+    """One successfully requested discovery page and its transport response."""
+
+    target: TargetUrl
+    depth: int
+    response: TransportResponse
+
+
+async def crawl(
+    seed: TargetUrl,
+    *,
+    allowed_origins: Collection[Origin],
+    policy: AddressPolicy,
+    resolver: AddressResolver,
+    request_limits: RequestLimits,
+    max_redirects: int,
+    limits: DiscoveryLimits,
+) -> AsyncIterator[DiscoveredPage]:
+    """Yield pages from a deterministic single-flight breadth-first crawl."""
+    from boundary.transport import request_with_redirects
+
+    frontier = Frontier()
+    frontier.enqueue(seed, 0)
+    visited_count = 0
+
+    while True:
+        item = frontier.dequeue()
+        if item is None:
+            return
+
+        visited_count += 1
+
+        response = await request_with_redirects(
+            item.target,
+            allowed_origins=allowed_origins,
+            policy=policy,
+            resolver=resolver,
+            limits=request_limits,
+            max_redirects=max_redirects,
+            method="GET",
+        )
+
+        frontier.mark_seen(response.final_target)
+
+        yield DiscoveredPage(
+            target=item.target,
+            depth=item.depth,
+            response=response,
+        )
+
+        if item.depth >= limits.max_depth:
+            continue
+
+        if not is_html_response(response.headers):
+            continue
+
+        for reference in extract_html_references(response.body):
+            candidate = resolve_candidate(
+                base=response.final_target,
+                reference=reference,
+                allowed_origins=allowed_origins,
+            )
+            if candidate is None:
+                continue
+
+            if visited_count + len(frontier) >= limits.max_pages:
+                continue
+
+            frontier.enqueue(candidate, item.depth + 1)
