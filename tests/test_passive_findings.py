@@ -9,12 +9,12 @@ from dataclasses import FrozenInstanceError, fields
 from enum import StrEnum
 
 import pytest
+
 from boundary.passive import (
     PassiveFinding,
     PassiveFindingKind,
     build_passive_finding,
 )
-
 from boundary.scope import TargetUrl, parse_target_url
 
 _RULE_ID = "passive.hsts.not_enforced.v1"
@@ -327,9 +327,36 @@ def test_passive_module_public_surface_is_minimal() -> None:
     assert hasattr(passive, "PassiveFinding")
     assert hasattr(passive, "PassiveFindingKind")
     assert hasattr(passive, "build_passive_finding")
-    assert not hasattr(passive, "scan_page")
-    assert not hasattr(passive, "scan_pages")
+    assert hasattr(passive, "scan_page")
+    assert hasattr(passive, "scan_pages")
     assert not hasattr(passive, "Rule")
     assert not hasattr(passive, "RuleEngine")
     assert not hasattr(passive, "RuleProtocol")
     assert not hasattr(passive, "register_rule")
+    for name in (
+        "check_hsts",
+        "check_nosniff",
+        "check_enforced_csp",
+        "check_frame_protection",
+        "check_cookie_secure",
+        "check_samesite_none_secure",
+        "header_values",
+        "canonicalize_evidence",
+        "parse_cookie_field",
+        "CookieMeta",
+    ):
+        assert not hasattr(passive, name)
+
+    public = {
+        name
+        for name, obj in vars(passive).items()
+        if not name.startswith("_")
+        and getattr(obj, "__module__", None) == "boundary.passive"
+    }
+    assert public == {
+        "PassiveFindingKind",
+        "PassiveFinding",
+        "build_passive_finding",
+        "scan_page",
+        "scan_pages",
+    }

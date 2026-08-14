@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Collection
+from collections.abc import AsyncIterable, AsyncIterator, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from boundary.discovery import is_html_response
+from boundary.discovery import DiscoveredPage, is_html_response
 
 if TYPE_CHECKING:
-    from boundary.discovery import DiscoveredPage
     from boundary.scope import TargetUrl
 
 _OWS = " \t"
@@ -472,3 +471,38 @@ def _check_samesite_none_secure(page: DiscoveredPage) -> tuple[PassiveFinding, .
             )
         )
     return tuple(findings)
+
+
+def scan_page(page: DiscoveredPage) -> tuple[PassiveFinding, ...]:
+    """Analyze one already-fetched page without additional network activity."""
+    seen: set[str] = set()
+    findings: list[PassiveFinding] = []
+    for rule in (
+        _check_hsts,
+        _check_nosniff,
+        _check_enforced_csp,
+        _check_frame_protection,
+        _check_cookie_secure,
+        _check_samesite_none_secure,
+    ):
+        for finding in rule(page):
+            fingerprint = finding.fingerprint
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            findings.append(finding)
+    return tuple(findings)
+
+
+async def scan_pages(
+    pages: AsyncIterable[DiscoveredPage],
+) -> AsyncIterator[PassiveFinding]:
+    """Yield page findings in stream order, suppressing duplicate fingerprints."""
+    emitted: set[str] = set()
+    async for page in pages:
+        for finding in scan_page(page):
+            fingerprint = finding.fingerprint
+            if fingerprint in emitted:
+                continue
+            emitted.add(fingerprint)
+            yield finding
