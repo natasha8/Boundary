@@ -20,6 +20,12 @@ _HSTS_ID = "passive.hsts.not_enforced.v1"
 _NOSNIFF_ID = "passive.nosniff.missing_or_invalid.v1"
 _CSP_ID = "passive.csp.missing_enforced_policy.v1"
 _FRAME_ID = "passive.framing.missing_protection.v1"
+_COOKIE_SECURE_ID = "passive.cookie.secure_missing_https.v1"
+_COOKIE_SAMESITE_ID = "passive.cookie.samesite_none_without_secure.v1"
+_COOKIE_TOKEN = (
+    "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
+_RECOGNIZED_SAMESITE = frozenset({"none", "lax", "strict"})
 
 
 class PassiveFindingKind(StrEnum):
@@ -328,3 +334,141 @@ def _check_frame_protection(page: DiscoveredPage) -> tuple[PassiveFinding, ...]:
             ("status", _status(page)),
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _CookieMeta:
+    name: str
+    secure_present: bool
+    same_sites: tuple[str | None, ...]
+
+
+def _is_cookie_name(name: str) -> bool:
+    return bool(name) and all(character in _COOKIE_TOKEN for character in name)
+
+
+def _parse_cookie_field(field: bytes) -> _CookieMeta | None:
+    segments = field.split(b";")
+    pair = segments[0]
+    separator = pair.find(b"=")
+    if separator < 0:
+        return None
+    raw_name = pair[:separator]
+    try:
+        name = raw_name.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if not _is_cookie_name(name):
+        return None
+
+    secure_present = False
+    same_sites: list[str | None] = []
+    for raw_attribute in segments[1:]:
+        text = _decode_ascii(raw_attribute)
+        if text is None:
+            continue
+        attribute = _strip_ows(text)
+        if not attribute:
+            continue
+        if "=" in attribute:
+            raw_attr_name, raw_attr_value = attribute.split("=", 1)
+            attr_name = _strip_ows(raw_attr_name)
+            attr_value: str | None = _strip_ows(raw_attr_value)
+        else:
+            attr_name = attribute
+            attr_value = None
+        lowered = attr_name.lower()
+        if lowered == "secure":
+            secure_present = True
+        elif lowered == "samesite":
+            if attr_value is not None and attr_value.lower() in _RECOGNIZED_SAMESITE:
+                same_sites.append(attr_value.lower())
+            else:
+                same_sites.append(None)
+
+    return _CookieMeta(
+        name=name,
+        secure_present=secure_present,
+        same_sites=tuple(same_sites),
+    )
+
+
+def _misconfiguration_finding(
+    page: DiscoveredPage,
+    *,
+    rule_id: str,
+    observation: str,
+    rationale: str,
+    evidence: Collection[tuple[str, str]],
+) -> PassiveFinding:
+    return build_passive_finding(
+        rule_id=rule_id,
+        kind=PassiveFindingKind.MISCONFIGURATION,
+        target=page.response.final_target,
+        requested_target=page.target,
+        observation=observation,
+        rationale=rationale,
+        evidence=evidence,
+    )
+
+
+def _check_cookie_secure(page: DiscoveredPage) -> tuple[PassiveFinding, ...]:
+    if page.response.final_target.scheme != "https":
+        return ()
+
+    findings: list[PassiveFinding] = []
+    for field in _header_values(page.response.headers, b"set-cookie"):
+        cookie = _parse_cookie_field(field)
+        if cookie is None or cookie.secure_present:
+            continue
+        findings.append(
+            _misconfiguration_finding(
+                page,
+                rule_id=_COOKIE_SECURE_ID,
+                observation="HTTPS Set-Cookie did not include the Secure attribute.",
+                rationale=(
+                    "A cookie set over HTTPS without Secure is a configuration "
+                    "observation, not a confirmed attack."
+                ),
+                evidence=(
+                    ("cookie", cookie.name),
+                    ("secure", "missing"),
+                    ("status", _status(page)),
+                ),
+            )
+        )
+    return tuple(findings)
+
+
+def _check_samesite_none_secure(page: DiscoveredPage) -> tuple[PassiveFinding, ...]:
+    findings: list[PassiveFinding] = []
+    for field in _header_values(page.response.headers, b"set-cookie"):
+        cookie = _parse_cookie_field(field)
+        if cookie is None:
+            continue
+        if (
+            len(cookie.same_sites) != 1
+            or cookie.same_sites[0] != "none"
+            or cookie.secure_present
+        ):
+            continue
+        findings.append(
+            _misconfiguration_finding(
+                page,
+                rule_id=_COOKIE_SAMESITE_ID,
+                observation=(
+                    "Set-Cookie used SameSite=None without the Secure attribute."
+                ),
+                rationale=(
+                    "SameSite=None without Secure is a configuration observation, "
+                    "not a confirmed attack."
+                ),
+                evidence=(
+                    ("cookie", cookie.name),
+                    ("same_site", "none"),
+                    ("secure", "missing"),
+                    ("status", _status(page)),
+                ),
+            )
+        )
+    return tuple(findings)
