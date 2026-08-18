@@ -1,4 +1,4 @@
-"""Explicit identity labels, comparison cases, and identity-scoped GET requests."""
+"""Explicit identity labels, comparison cases, identity-scoped GET requests, and response comparison."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import re
 from collections.abc import Collection
 from dataclasses import dataclass
 
+from boundary.evidence import ResponseEvidence
 from boundary.scope import AddressPolicy, AddressResolver, Origin, TargetUrl
 from boundary.transport import (
     OriginBoundCredentials,
@@ -66,4 +67,27 @@ async def request_as(
         method="GET",
         headers=(),
         credentials=credentials,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseComparison:
+    """Independent equality flags for two captured response projections."""
+
+    status_equal: bool
+    body_length_equal: bool
+    body_sha256_equal: bool
+    final_target_equal: bool
+
+
+def compare_response_evidence(
+    baseline: ResponseEvidence,
+    comparison: ResponseEvidence,
+) -> ResponseComparison:
+    """Compare two captured projections on status, length, digest and final target."""
+    return ResponseComparison(
+        status_equal=baseline.status == comparison.status,
+        body_length_equal=baseline.body_length == comparison.body_length,
+        body_sha256_equal=baseline.body_sha256 == comparison.body_sha256,
+        final_target_equal=baseline.final_target == comparison.final_target,
     )
