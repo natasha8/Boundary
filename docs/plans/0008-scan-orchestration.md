@@ -1,12 +1,13 @@
 # Scan Orchestration Plan
 
-- Status: Planned
+- Status: Completed
 - Milestone: 7
 - Planned: 2026-08-18
-- Planned implementation: `src/boundary/scan.py`, with a thin `scan`
+- Completed: 2026-08-19
+- Implementation: `src/boundary/scan.py`, with a thin `scan`
   subcommand in `src/boundary/cli.py`
-- Planned tests: `tests/test_scan_config.py`,
-  `tests/test_scan_orchestration.py`, `tests/test_cli_scan.py`
+- Tests: `tests/test_scan_config.py`,
+  `tests/test_scan_run.py`, `tests/test_cli_scan.py`
 - Decision record: `docs/decisions/0007-scan-orchestration.md`
 
 ## Purpose
@@ -14,21 +15,25 @@
 Scan Orchestration turns the existing BOUNDARY primitives into one
 deterministic, uncredentialed scan workflow.
 
-It makes one statement possible that the repository cannot make today:
+It makes one statement possible that the repository could not make before
+this milestone:
 
 - this explicit `ScanConfig` produced this ordered `ScanResult` of
   `FindingEvidence` values, or it failed with the original Scope / Transport
   / URL / programming exception.
 
-The composition is:
+The final flow is:
 
-    ScanConfig
-        -> require_allowed_origin
-        -> crawl(...)
-        -> scan_page(page)
-        -> capture_response_evidence(...)
-        -> FindingEvidence(...)
+    CLI
+        -> ScanConfig
+        -> crawl
+        -> scan_page
+        -> capture_response_evidence
+        -> FindingEvidence
         -> ScanResult
+
+`ScanConfig` construction still calls `require_allowed_origin` before any
+crawl.
 
 Orchestration does not own URL parsing rules, origin/IP policy, HTTP
 execution, crawling, passive rules, evidence hashing, authorization
@@ -65,10 +70,10 @@ The completed Authorization Engine provides `AuthorizationCase`,
 wired into M7. Credential/session acquisition does not exist and will not be
 invented here.
 
-The current CLI prints help for any invocation and has no `scan`
-subcommand.
+Before this milestone the CLI printed help for any invocation and had no
+`scan` subcommand.
 
-## Planned architecture
+## Delivered architecture
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -92,9 +97,15 @@ class ScanResult:
 async def run_passive_scan(config: ScanConfig) -> ScanResult: ...
 ```
 
-The final implemented surface of `scan.py` is exactly those three names.
+The delivered public surface is:
 
-`cli.py` adds a `scan` subcommand that:
+- `ScanConfig`
+- `ScanResult`
+- `run_passive_scan`
+- `boundary scan` CLI command
+
+`scan.py` exposes exactly `ScanConfig`, `ScanResult` and `run_passive_scan`.
+`cli.py` added the `scan` subcommand that:
 
 1. parses required target, allowlist, policy, page/depth/redirect/body
    budgets and optional timeout flags;
@@ -108,7 +119,7 @@ modules it composes (`scope`, `discovery`, `passive`, `evidence`, and
 transport types already required by those signatures). It does not import
 `authorization` or `cli`. Lower-layer modules do not import `scan.py`.
 
-No `ScanEngine` class is added.
+No `ScanEngine` class was added.
 
 ## Why this shape
 
@@ -139,29 +150,26 @@ or CLI flags would invent a vault.
 
 ## Delivery slices
 
-Tests are written before the implementation of each slice. A slice is
-complete only when its acceptance criteria hold. Do not start Slice B until
-Slice A passes on its own.
+Tests were written before the implementation of each slice. A slice is
+complete only when its acceptance criteria hold.
 
-Adjusted sequence: **A, B, D**. Slice C (extra run metadata) and Slice E
-(authorization orchestration) are deferred because the architecture does not
-need them for the first M7 workflow.
+Implemented sequence: **A, B, D**. Slice C (run metadata) and Slice E
+(authorization orchestration) remain explicitly deferred because the
+architecture does not need them for the first M7 workflow.
 
-### Slice A: Scan configuration value model
+### Slice A: Scan configuration value model — completed
 
 Tests: `tests/test_scan_config.py`
 
-Deliver:
+Delivered:
 
 - frozen, slotted `ScanConfig` with exactly the seven approved fields, in
   that order, and no defaults;
 - `__post_init__` calling `require_allowed_origin(target, allowed_origins)`
   and rejecting `max_redirects < 0` with `ValueError`;
-- no `ScanResult` / `run_passive_scan` requirement yet if that keeps the
-  slice smaller; adding the empty `ScanResult` type in Slice A is allowed
-  only as the frozen findings tuple with no extra fields.
+- no `ScanResult` / `run_passive_scan` requirement in this slice.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `ScanConfig` is frozen and slotted; assignment raises
   `FrozenInstanceError`; instances have no `__dict__`;
@@ -188,11 +196,11 @@ Acceptance criteria:
 - error messages contain no response bodies and no credential bytes
   (there are none to echo).
 
-### Slice B: Passive scan orchestration and result
+### Slice B: Passive scan orchestration and result — completed
 
-Tests: `tests/test_scan_orchestration.py`
+Tests: `tests/test_scan_run.py`
 
-Deliver:
+Delivered:
 
 - frozen, slotted `ScanResult` with exactly `findings: tuple[FindingEvidence, ...]`;
 - `async def run_passive_scan(config: ScanConfig) -> ScanResult`;
@@ -205,7 +213,7 @@ DNS/sockets. Do not mock `scan_page`, do not reimplement rules, and do not
 replace `crawl` with a stub when testing the workflow — fake the transport
 hop, not the orchestration behavior.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `crawl` is called with `seed=config.target` and the config's
   `allowed_origins`, `policy`, `resolver`, `request_limits`,
@@ -243,19 +251,19 @@ Acceptance criteria:
 
 ### Slice C: Run metadata — deferred / not implemented
 
-Not required to execute or test the M7 workflow.
+Not required to execute or test the M7 workflow. Explicitly deferred.
 
 Do not add run id, timestamps, duration, `pages_visited`, argv snapshots or
 a copy of `ScanConfig` onto `ScanResult`. Reconsider only when a Milestone 8
 serializer has a concrete field it cannot obtain from the caller-held
 `ScanConfig` plus `ScanResult.findings`.
 
-### Slice D: CLI `scan` command wiring
+### Slice D: CLI `scan` command wiring — completed
 
 Tests: `tests/test_cli_scan.py` (keep `tests/test_cli.py` covering
 no-argument help)
 
-Deliver:
+Delivered:
 
 - `scan` subcommand on the existing argparse parser;
 - required flags listed in ADR 0007;
@@ -270,7 +278,7 @@ must not import `crawl`, `scan_page` or `capture_response_evidence`.
 
 Preserve `main([])` printing help and exiting 0.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `boundary` with no arguments still prints the existing help text and does
   not start a scan;
@@ -301,11 +309,11 @@ Acceptance criteria:
 
 ### Slice E: Authorization orchestration — deferred / not implemented
 
-M6 contracts can execute one explicit pair only when the caller already
-holds identities and origin-bound credentials. There is still no vault,
-login flow, CLI credential channel or scan profile.
+Explicitly deferred. M6 contracts can execute one explicit pair only when
+the caller already holds identities and origin-bound credentials. There is
+still no vault, login flow, CLI credential channel or scan profile.
 
-Implementing Slice E now would require inventing one of those. Do not.
+Implementing Slice E would require inventing one of those. Do not.
 
 `run_passive_scan` stays uncredentialed. A later milestone may add a
 **separate** function over caller-supplied `AuthorizationCase` values
@@ -365,7 +373,7 @@ claiming they do not leak into `ScanResult`.
 
 ## Milestone non-goals
 
-Not added:
+Not added, and still deferred:
 
 - SARIF, JSON, Markdown, HTML reporting, dashboards;
 - persistence of any kind;
@@ -384,7 +392,7 @@ Not added:
 
 ## Dependency decision
 
-No dependency will be added.
+No dependency was added.
 
 Argparse, dataclasses, asyncio and the existing BOUNDARY modules are
 sufficient. HTTPCore remains the single runtime HTTP dependency, reached
@@ -392,8 +400,7 @@ only through Transport as today.
 
 ## Verification sequence
 
-Repository checks at closeout of each implemented slice, and at milestone
-closeout:
+Repository checks executed at closeout:
 
 ```text
 uv run ruff format --check .
@@ -403,18 +410,40 @@ uv run pytest
 git diff --check
 ```
 
-Focused new tests run first, then the complete suite. No test may contact a
-public target, skip a security assertion or weaken an existing check.
+CLI focused (`tests/test_cli.py`, `tests/test_cli_scan.py`): 50 passed.
+Full repository suite: 1222 passed.
+ruff: clean.
+mypy: clean.
+`git diff --check`: clean.
 
-This architecture-only change must itself pass those documentation-
-compatible gates without adding production code or tests.
+Focused CLI tests ran first, then the complete suite. No test contacted a
+public target, skipped a security assertion or weakened an existing check.
 
-## Definition of done (when implementation is later executed)
+## Test coverage
+
+CLI focused (`tests/test_cli.py`, `tests/test_cli_scan.py`): 50 passed.
+
+Full repository suite at closeout: 1222 tests collected and passing, with no
+skipped tests.
+
+## Unresolved boundaries for Milestone 8
+
+These remain inherited or deferred. They are not M7 defects, and this
+closeout does not specify a Milestone 8 design:
+
+- query-string tokens may still appear through `TargetUrl.url`;
+- reporting/export redaction must be decided before serialization;
+- no authorization credentials or session acquisition in the generic scan;
+- no run ids or timestamps unless reporting proves they are needed.
+
+## Definition of done
+
+Met:
 
 - Slices A, B and D meet every acceptance criterion;
 - Slices C and E remain absent, with deferral documented;
-- public `scan.py` surface is exactly `ScanConfig`, `ScanResult`,
-  `run_passive_scan`;
+- the delivered public surface is `ScanConfig`, `ScanResult`,
+  `run_passive_scan` and the `boundary scan` CLI command;
 - `boundary scan` is a thin adapter and produces no report format;
 - authorization is not imported or invoked;
 - formatting, linting, typing and all tests pass without skipped or
@@ -422,10 +451,3 @@ compatible gates without adding production code or tests.
 - ADR 0007 and this plan match the implementation, including deferred
   items;
 - no dependency was added.
-
-Architecture-only definition of done (this change):
-
-- ADR 0007 and this plan exist and agree;
-- no production code, tests or dependency changes;
-- no commit;
-- documentation-compatible quality gates pass.
