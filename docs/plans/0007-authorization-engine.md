@@ -1,11 +1,12 @@
 # Authorization Engine Plan
 
-- Status: Approved, not started
+- Status: Completed
 - Milestone: 6
 - Planned: 2026-08-18
-- Planned implementation: `src/boundary/authorization.py`, with a narrow
+- Completed: 2026-08-18
+- Implementation: `src/boundary/authorization.py`, with a narrow
   change to `src/boundary/transport.py`
-- Planned tests: `tests/test_authorization_identity.py`,
+- Tests: `tests/test_authorization_identity.py`,
   `tests/test_transport_credentials.py`,
   `tests/test_authorization_request.py`,
   `tests/test_authorization_compare.py`,
@@ -18,7 +19,8 @@ The Authorization Engine performs controlled IDOR/BOLA-style comparisons
 between two explicitly configured identities on one explicitly configured
 target.
 
-It makes two statements possible that the repository cannot make today:
+It makes two statements possible that the repository could not make before
+this milestone:
 
 - these two named identities produced these two captured response projections
   for the same requested target;
@@ -63,7 +65,7 @@ Discovery and Passive Scanner remain uncredentialed. They are not modified
 except that Transport's new optional `credentials=` parameter defaults to
 `None`, so existing callers are unchanged.
 
-## Planned architecture
+## Delivered architecture
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,19 @@ class AuthorizationObservation:
     def fingerprint(self) -> str: ...
 ```
 
+The final implemented surface is:
+
+- `Identity`
+- `AuthorizationCase`
+- `OriginBoundCredentials`
+- credential-contained redirects
+- `request_as`
+- `ResponseComparison`
+- `compare_response_evidence`
+- `AuthorizationObservationKind`
+- `AuthorizationObservation`
+- deterministic observation `fingerprint`
+
 `OriginBoundCredentials` and `credentials=` on `request_with_redirects` live
 in `transport.py`. Everything else lives in `authorization.py`.
 
@@ -151,7 +166,7 @@ existing BOUNDARY modules it must call (`transport`, `scope`, `evidence`).
 It does not import `discovery` or `passive`. `evidence.py` and `passive.py`
 do not import `authorization.py`.
 
-No `AuthorizationEngine` class is planned. Pair sequencing is the documented
+No `AuthorizationEngine` class was added. Pair sequencing is the documented
 caller-side loop above, the same shape Milestone 5 used for evidence
 composition.
 
@@ -167,7 +182,7 @@ sent. Rebuilding redirects on `request_once` would duplicate hop, loop, scope
 and pinning control. `max_redirects=0` would refuse legitimate same-origin
 redirects.
 
-Slice B therefore adds origin-bound credentials as an optional Transport
+Slice B therefore added origin-bound credentials as an optional Transport
 parameter, fail-closed on cross-origin follow-up, without changing the
 uncredentialed Discovery path.
 
@@ -191,14 +206,14 @@ identity, and recording it would falsify the comparison.
 
 ## Delivery slices
 
-Tests are written before the implementation of each slice, and a slice is
+Tests were written before the implementation of each slice, and a slice is
 complete only when its acceptance criteria hold.
 
-### Slice A: Safe identity metadata and ephemeral credentials
+### Slice A: Safe identity metadata and ephemeral credentials — completed
 
 Tests: `tests/test_authorization_identity.py`
 
-To deliver:
+Delivered:
 
 - frozen, slotted `Identity` with exactly `identity_id`;
 - `identity_id` canonical-state checks (`^[A-Za-z0-9._-]+$`, non-empty);
@@ -208,7 +223,7 @@ To deliver:
   case-insensitive, with no duplicate names; custom API-key headers deferred;
 - `AuthorizationCase` with two distinct, ordered identities.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `Identity` has no headers, tokens, cookies or password fields;
 - assignment raises `FrozenInstanceError`; instances have no `__dict__`;
@@ -227,14 +242,14 @@ Acceptance criteria:
 - no vault, login helper, secret manager or `AuthorizationEngine` exists;
 - fail-fast network guards are active; construction performs no I/O.
 
-### Slice B: Transport origin-bound credential containment
+### Slice B: Transport origin-bound credential containment — completed
 
 Tests: `tests/test_transport_credentials.py`
 
 This is the isolated Transport change. It exists because uncredentialed
 header forwarding is not a safe credential contract.
 
-To deliver:
+Delivered:
 
 - `TransportErrorCode.CROSS_ORIGIN_CREDENTIAL_REDIRECT`;
 - keyword-only `credentials: OriginBoundCredentials | None = None` on
@@ -246,7 +261,7 @@ To deliver:
   origin-bound containment;
 - uncredentialed calls keep today's generic header forwarding.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - same-origin relative and absolute redirects still send the bound headers;
 - an out-of-allowlist or unsafe `Location` still raises the existing Scope /
@@ -267,18 +282,18 @@ Acceptance criteria:
 - `request_once` signature is unchanged;
 - `crawl` is not modified.
 
-### Slice C: Credential-aware request and response-pair capture
+### Slice C: Credential-aware request and response-pair capture — completed
 
 Tests: `tests/test_authorization_request.py`
 
-To deliver:
+Delivered:
 
 - `request_as(...)` as a thin GET-only call through
   `request_with_redirects`;
 - caller-side capture of one `ResponseEvidence` per identity using
   `capture_response_evidence(response, requested_target=target)`.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `request_as` is GET-only; other methods raise `ValueError` before I/O;
 - no request body is sent;
@@ -293,16 +308,16 @@ Acceptance criteria:
   still completes using the Transport fake already used by transport tests;
 - `authorization.py` does not import `discovery` or `passive`.
 
-### Slice D: Deterministic comparison primitives
+### Slice D: Deterministic comparison primitives — completed
 
 Tests: `tests/test_authorization_compare.py`
 
-To deliver:
+Delivered:
 
 - frozen, slotted `ResponseComparison` with exactly the four booleans;
 - `compare_response_evidence(baseline, comparison)`.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - each flag is independent: a status-only change flips only `status_equal`,
   and likewise for length, digest and final target;
@@ -311,14 +326,13 @@ Acceptance criteria:
   credentials or headers;
 - `evidence.py` still has no `compare_responses` helper;
 - equal flags are not named IDOR, BOLA, vulnerable or confirmed anywhere in
-  the type, field names or default observation text produced later in
-  Slice E.
+  the type, field names or default observation text produced in Slice E.
 
-### Slice E: Minimal observation for one explicit pair
+### Slice E: Minimal observation for one explicit pair — completed
 
 Tests: `tests/test_authorization_observation.py`
 
-To deliver:
+Delivered:
 
 - `AuthorizationObservationKind`;
 - frozen, slotted `AuthorizationObservation`;
@@ -327,7 +341,7 @@ To deliver:
 - documented caller-side loop that emits one observation for a completed
   pair and none when a request fails.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - a completed pair always yields exactly one observation;
 - supplied `kind` must match the four flags: all four
@@ -410,7 +424,7 @@ Network entry points remain replaced by fail-fast assertions in suites that
 claim zero DNS/TCP. Credential-absence assertions place secrets only in
 request headers, never in target query strings.
 
-## Planned security invariants
+## Final security invariants
 
 - Scope Engine remains authoritative; authorization does not expand scope;
 - every request uses `request_with_redirects` (GET, pinned, bounded, timed);
@@ -426,7 +440,7 @@ request headers, never in target query strings.
 
 ## Milestone non-goals
 
-Not added, and deferred:
+Not added, and still deferred:
 
 - automated login, password handling, credential discovery, vaults;
 - browser sessions, cookie jars, CSRF automation;
@@ -443,32 +457,51 @@ Not added, and deferred:
 
 ## Dependency decision
 
-No dependency is required.
+No dependency was added.
 
-The standard library provides dataclasses, `StrEnum`, SHA-256 and canonical
-JSON. Transport, Scope and Evidence already exist. HTTPCore remains the
-single runtime HTTP dependency; authorization does not add another client.
+The standard library provided dataclasses, `StrEnum`, SHA-256 and canonical
+JSON. Transport, Scope and Evidence already existed. HTTPCore remains the
+single runtime HTTP dependency; authorization did not add another client.
 
 ## Verification sequence
 
-Checks to execute for each slice and at closeout:
+Repository checks executed at closeout:
 
 ```text
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run pytest
+git diff --check
 ```
 
-Focused authorization and transport-credential tests run first, then the
-complete suite. No test may contact a public target, skip a security
-assertion or weaken an existing check.
+Focused Slice E (`tests/test_authorization_observation.py`): 62 passed.
+Full repository suite: 1080 passed.
+ruff format and ruff check: clean.
+mypy: clean.
+`git diff --check`: clean.
+
+Focused authorization and transport-credential tests ran first, then the
+complete suite. No test contacted a public target, skipped a security
+assertion or weakened an existing check.
+
+## Test coverage
+
+Focused Slice E (`tests/test_authorization_observation.py`): 62 passed.
+
+Full repository suite at closeout: 1080 tests collected and passing, with no
+skipped tests.
 
 ## Definition of done
 
-The milestone is complete only when:
+Met:
 
 - Slices A through E meet every acceptance criterion;
+- the final implemented surface is `Identity`, `AuthorizationCase`,
+  `OriginBoundCredentials`, credential-contained redirects, `request_as`,
+  `ResponseComparison`, `compare_response_evidence`,
+  `AuthorizationObservationKind`, `AuthorizationObservation` and the
+  deterministic observation `fingerprint`;
 - Transport credential containment is fail-closed and isolated from
   uncredentialed Discovery behavior;
 - `ResponseEvidence` is reused; no second snapshot type exists;
