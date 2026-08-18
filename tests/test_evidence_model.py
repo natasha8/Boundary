@@ -10,8 +10,8 @@ from dataclasses import FrozenInstanceError, fields
 
 import anyio
 import pytest
-from boundary.evidence import FindingEvidence, ResponseEvidence
 
+from boundary.evidence import FindingEvidence, ResponseEvidence
 from boundary.passive import (
     PassiveFinding,
     PassiveFindingKind,

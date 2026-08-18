@@ -21,6 +21,8 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.1",
 ]
+[tool.ruff]
+extend-exclude = [".agents/skills"]
 
 [tool.ruff.lint]
 select = [
