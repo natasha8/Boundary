@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from boundary.passive import PassiveFinding
     from boundary.scope import TargetUrl
+    from boundary.transport import TransportResponse
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,3 +63,18 @@ class FindingEvidence:
             separators=(",", ":"),
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def capture_response_evidence(
+    response: TransportResponse,
+    *,
+    requested_target: TargetUrl,
+) -> ResponseEvidence:
+    """Derive a captured response projection from a supplied transport response."""
+    return ResponseEvidence(
+        status=response.status,
+        final_target=response.final_target,
+        requested_target=requested_target,
+        body_length=len(response.body),
+        body_sha256=hashlib.sha256(response.body).hexdigest(),
+    )
