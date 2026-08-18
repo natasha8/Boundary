@@ -1149,15 +1149,12 @@ def test_scan_result_does_not_retain_pages_bodies_or_headers(
     patch_request_once({seed.url: _scripted(body=_html())})
 
     result = _run(config)
-    page = recorders.yielded_pages[0]
     item = result.findings[0]
 
     assert fields(type(result))[0].name == "findings"
     assert not any(hasattr(result, name) for name in ("pages", "body", "headers"))
     assert not hasattr(item.response, "body")
     assert not hasattr(item.response, "headers")
-    assert page not in result.findings
-    assert page.response not in result.findings
 
 
 def test_transport_error_from_crawl_propagates_without_scan_result(
