@@ -1,24 +1,25 @@
 # ADR 0005: Record deterministic evidence without persistence or verdicts
 
-- Status: Accepted (Milestone 5), implementation pending
+- Status: Accepted and implemented (Milestone 5)
 - Date: 2026-08-18
-- Planned implementation: `src/boundary/evidence.py`
-- Planned tests: `tests/test_evidence_model.py`,
+- Implemented: 2026-08-18
+- Implementation: `src/boundary/evidence.py`
+- Tests: `tests/test_evidence_model.py`,
   `tests/test_evidence_response.py`, `tests/test_evidence_composition.py`
 - Depends on: `docs/decisions/0004-passive-security-scanning.md`
 - Implementation plan: `docs/plans/0006-evidence-engine.md`
 
 ## Context
 
-BOUNDARY claims reproducible evidence and deterministic validation. The
-completed layers do not yet support that claim:
+BOUNDARY claims reproducible evidence and deterministic validation. Before
+this milestone, the completed layers did not yet support that claim:
 
 - `PassiveFinding` carries a rule identity, the final target, requested-target
   provenance and sanitized rule facts, but nothing about the response beyond
   what a rule chose to record;
 - `TransportResponse.body` exists on the input value, but no implemented rule
   reads it and `scan_page` discards it;
-- nothing in the repository can state that two observations share one captured
+- nothing in the repository could state that two observations share one captured
   response projection, or that that projection changed between runs.
 
 The next security capability on the roadmap is authorization testing, which
@@ -28,7 +29,7 @@ the future Authorization Engine would mean designing evidence under the
 pressure of an active-testing feature, which is exactly when shortcuts such as
 storing raw responses become attractive.
 
-Milestone 5 therefore defines the evidence layer first, while the only consumer
+Milestone 5 therefore defined the evidence layer first, while the only consumer
 is passive analysis and the only inputs are values that already exist.
 
 The core principle is:
@@ -38,16 +39,17 @@ The core principle is:
 
 ## Decision
 
-BOUNDARY will add one cohesive module, `src/boundary/evidence.py`, containing
+BOUNDARY added one cohesive module, `src/boundary/evidence.py`, containing
 immutable values and plain functions in the same style as `scope.py`,
-`transport.py`, `discovery.py` and `passive.py`.
+`transport.py`, `discovery.py` and `passive.py`. The sections below describe
+the delivered behavior.
 
 ### Core invariant
 
 > The Evidence Engine derives facts from data it is given. It performs no
 > network activity and reaches no verdict.
 
-The module will not:
+The delivered code does not:
 
 - make an HTTP request, or call `crawl`, `request_once` or
   `request_with_redirects`;
@@ -66,11 +68,11 @@ boundaries, Transport for HTTP execution, Discovery for page discovery, Passive
 Scanner for passive rule evaluation. Evidence adds only deterministic
 observation records.
 
-Only annotations require the other domain modules, so `evidence.py` will import
+Only annotations require the other domain modules, so `evidence.py` imports
 `TargetUrl`, `TransportResponse` and `PassiveFinding` under `TYPE_CHECKING`
 with `from __future__ import annotations`. Runtime imports stay in the
 standard library: `hashlib`, `json`, `dataclasses`, and `typing` for
-`TYPE_CHECKING`. The dependency direction is one-way: `passive.py` must never
+`TYPE_CHECKING`. The dependency direction is one-way: `passive.py` does not
 import `evidence.py`.
 
 The boundary is about runtime behavior, not source text. Naming `TargetUrl`,
@@ -206,7 +208,7 @@ this observation" without turning either value into a subset of the other.
 A violation is a programming defect — pairing a finding with a different
 response — and raises `ValueError`. This is real validation, not a wrapper, so
 `FindingEvidence` is constructed directly; no `build_finding_evidence` helper
-will be added because it would add no behavior beyond the constructor.
+was added because it would add no behavior beyond the constructor.
 
 ### Division of responsibility
 
@@ -228,7 +230,7 @@ Both own the target pair, and `FindingEvidence` requires them to agree.
 that produced it, plus that linkage's identity.
 
 `PassiveFinding.evidence` remains the canonical sanitized rule-fact channel.
-Milestone 5 adds no second metadata channel: no `Mapping[str, Any]`, no
+Milestone 5 added no second metadata channel: no `Mapping[str, Any]`, no
 untyped JSON blob, no extra key/value tuple on either evidence value. If a
 future consumer needs a fact that is neither a rule fact nor one of the five
 response fields, it must be added as a narrow typed field with a documented
@@ -295,7 +297,7 @@ Consequences of that choice, all intended:
 
 ### Body digest contract and limits
 
-If accepted — and it is accepted — body hashing obeys a narrow contract:
+Body hashing obeys a narrow contract:
 
 - hash exactly the `TransportResponse.body` bytes;
 - SHA-256, lowercase hexadecimal;
@@ -403,7 +405,8 @@ A fifth option — an evidence stream function that consumes
 `AsyncIterable[DiscoveredPage]` and calls `scan_page` internally — was
 considered and deferred. It would have to restate the run-level
 fingerprint-suppression rule that `scan_pages` already owns, duplicating a
-delivered contract for no current consumer. See Slice D in the plan.
+delivered contract for no current consumer. See Slice D in the plan. No
+`EvidenceEngine` class was created.
 
 One consequence must be stated plainly: the evidence composition uses
 `scan_page`, so the cross-page fingerprint suppression performed by
@@ -426,7 +429,7 @@ Milestone 5 parses nothing and decodes nothing, so it needs no error
 isolation. Hashing bytes and taking their length cannot fail on a well-typed
 input, and no untrusted text is interpreted.
 
-Consequently the module will contain no `try` / `except` at all, and in
+Consequently the module contains no `try` / `except` at all, and in
 particular no broad `except Exception`. Programming defects propagate. There
 are exactly two raising conditions, both `ValueError` and both defects rather
 than untrusted input:
@@ -446,7 +449,7 @@ Response content is excluded by construction rather than by later redaction.
 `ResponseEvidence` holds two integers, one hexadecimal digest and two
 normalized `TargetUrl` values, and no field can hold response text.
 
-The module will never copy:
+The module does not copy:
 
 - response headers, whole or partial, including header names;
 - `Authorization` header values;
@@ -500,21 +503,24 @@ For the same inputs the module produces the same evidence values and the same
 Timestamps may be useful for reporting later. They are deferred, and if added
 they must stay outside identity.
 
-### Planned surface
+### Delivered surface
 
-`src/boundary/evidence.py` will expose exactly:
+`src/boundary/evidence.py` exposes exactly:
 
 - `ResponseEvidence`;
 - `FindingEvidence`;
 - `capture_response_evidence`.
 
 No `EvidenceEngine`, builder class, abstract base class, protocol, registry,
-factory, repository, cache, serializer or comparison helper.
+factory, repository, cache, serializer, stream API or comparison helper.
 
 ## Deferred
 
-Explicitly not part of Milestone 5:
+Explicitly not part of Milestone 5, including Slices D and E:
 
+- an evidence stream API, `EvidenceEngine` class or caller-hiding
+  orchestration that would restate `scan_pages` fingerprint suppression;
+- a `compare_responses` helper or semantic response-similarity primitive;
 - authorization testing, identity and session management, IDOR and BOLA;
 - active exploitation and payload generation;
 - request replay, raw request archival and raw response archival;
@@ -534,7 +540,7 @@ and `FindingEvidence` field by field, without parsing human prose. That is why
 
 ## Authorization Engine preparation
 
-Milestone 5 adds no identity, login flow, session, request mutation or
+Milestone 5 added no identity, login flow, session, request mutation or
 authorization verdict. It only ensures the generic primitives a later
 comparison will need already exist and are deterministic:
 
@@ -575,7 +581,7 @@ Positive:
   produced findings;
 - the future Authorization Engine inherits ready comparison primitives instead
   of inventing them under feature pressure;
-- no dependency is required.
+- no dependency was added.
 
 Negative:
 
