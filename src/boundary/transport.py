@@ -28,6 +28,7 @@ class TransportErrorCode(StrEnum):
     TOO_MANY_REDIRECTS = "too_many_redirects"
     REDIRECT_LOOP = "redirect_loop"
     INVALID_REDIRECT = "invalid_redirect"
+    CROSS_ORIGIN_CREDENTIAL_REDIRECT = "cross_origin_credential_redirect"
 
 
 class TransportError(RuntimeError):
@@ -46,6 +47,48 @@ class TransportResponse:
     headers: tuple[tuple[bytes, bytes], ...]
     body: bytes
     final_target: TargetUrl
+
+
+_CREDENTIAL_HEADER_ALLOWLIST = frozenset({b"authorization", b"cookie"})
+
+
+@dataclass(frozen=True, slots=True)
+class OriginBoundCredentials:
+    """Ephemeral credential headers bound to one exact origin."""
+
+    origin: Origin
+    headers: tuple[tuple[bytes, bytes], ...]
+
+    def __post_init__(self) -> None:
+        if not self.headers:
+            raise ValueError("Origin-bound credentials cannot be empty.")
+
+        seen: set[bytes] = set()
+        for pair in self.headers:
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or type(pair[0]) is not bytes
+                or type(pair[1]) is not bytes
+            ):
+                raise ValueError("Credential headers must be a tuple of byte pairs.")
+
+            name, _value = pair
+            lowered = name.lower()
+            if lowered not in _CREDENTIAL_HEADER_ALLOWLIST:
+                raise ValueError("Credential header name is not on the allowlist.")
+            if lowered in seen:
+                raise ValueError("Credential header name is duplicated.")
+            seen.add(lowered)
+
+    def __repr__(self) -> str:
+        return (
+            f"OriginBoundCredentials(origin={self.origin!r}, "
+            f"header_count={len(self.headers)})"
+        )
+
+    def __str__(self) -> str:
+        return repr(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +249,17 @@ def _unique_location(headers: Collection[tuple[bytes, bytes]]) -> bytes | None:
     return locations[0]
 
 
+def _credential_request_headers(
+    headers: Collection[tuple[bytes, bytes]],
+    credentials: OriginBoundCredentials,
+) -> tuple[tuple[bytes, bytes], ...]:
+    """Merge caller headers with origin-bound credentials, rejecting overlap."""
+    for name, _value in headers:
+        if name.lower() in _CREDENTIAL_HEADER_ALLOWLIST:
+            raise ValueError("Caller headers overlap the credential header bag.")
+    return tuple(headers) + credentials.headers
+
+
 async def request_with_redirects(
     target: TargetUrl,
     *,
@@ -216,10 +270,19 @@ async def request_with_redirects(
     max_redirects: int,
     method: str = "GET",
     headers: Collection[tuple[bytes, bytes]] = (),
+    credentials: OriginBoundCredentials | None = None,
 ) -> TransportResponse:
     """Send an HTTP request and follow in-scope redirects under hop and loop limits."""
     if max_redirects < 0:
         raise ValueError("max_redirects must be non-negative")
+
+    hop_headers: Collection[tuple[bytes, bytes]] = headers
+    if credentials is not None:
+        if target.origin != credentials.origin:
+            raise ValueError(
+                "The initial request origin differs from the bound origin."
+            )
+        hop_headers = _credential_request_headers(headers, credentials)
 
     current = target
     visited: set[str] = set()
@@ -246,7 +309,7 @@ async def request_with_redirects(
             current,
             pinned_ip,
             method=method,
-            headers=headers,
+            headers=hop_headers,
             limits=limits,
         )
 
@@ -275,6 +338,12 @@ async def request_with_redirects(
             raise TransportError(
                 TransportErrorCode.REDIRECT_LOOP,
                 "Redirect loop detected.",
+            )
+
+        if credentials is not None and next_target.origin != credentials.origin:
+            raise TransportError(
+                TransportErrorCode.CROSS_ORIGIN_CREDENTIAL_REDIRECT,
+                "The redirect destination origin differs from the bound origin.",
             )
 
         redirects_followed += 1
