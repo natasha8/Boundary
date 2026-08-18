@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "security-fuzzing": {
+      "source": "Eyadkelleh/awesome-skills-security",
+      "sourceType": "github",
+      "skillPath": "skills/security-fuzzing/SKILL.md",
+      "computedHash": "0485e8ec67895f127f83e3fe0d75a1dc73c2f8ec7268957a4976f6c3e5cf599e"
+    },
+    "security-patterns": {
+      "source": "Eyadkelleh/awesome-skills-security",
+      "sourceType": "github",
+      "skillPath": "skills/security-patterns/SKILL.md",
+      "computedHash": "feda3b13e78ad18f53046328dd7a336a3ccf9b6f5d9f47e3a8d6ebb5d600ca8b"
+    }
+  }
+}
