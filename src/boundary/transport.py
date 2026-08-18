@@ -48,6 +48,48 @@ class TransportResponse:
     final_target: TargetUrl
 
 
+_CREDENTIAL_HEADER_ALLOWLIST = frozenset({b"authorization", b"cookie"})
+
+
+@dataclass(frozen=True, slots=True)
+class OriginBoundCredentials:
+    """Ephemeral credential headers bound to one exact origin."""
+
+    origin: Origin
+    headers: tuple[tuple[bytes, bytes], ...]
+
+    def __post_init__(self) -> None:
+        if not self.headers:
+            raise ValueError("Origin-bound credentials cannot be empty.")
+
+        seen: set[bytes] = set()
+        for pair in self.headers:
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or type(pair[0]) is not bytes
+                or type(pair[1]) is not bytes
+            ):
+                raise ValueError("Credential headers must be a tuple of byte pairs.")
+
+            name, _value = pair
+            lowered = name.lower()
+            if lowered not in _CREDENTIAL_HEADER_ALLOWLIST:
+                raise ValueError("Credential header name is not on the allowlist.")
+            if lowered in seen:
+                raise ValueError("Credential header name is duplicated.")
+            seen.add(lowered)
+
+    def __repr__(self) -> str:
+        return (
+            f"OriginBoundCredentials(origin={self.origin!r}, "
+            f"header_count={len(self.headers)})"
+        )
+
+    def __str__(self) -> str:
+        return repr(self)
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectionReuseKey:
     """Identity under which a keep-alive connection may be shared."""
