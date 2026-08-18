@@ -28,6 +28,7 @@ class TransportErrorCode(StrEnum):
     TOO_MANY_REDIRECTS = "too_many_redirects"
     REDIRECT_LOOP = "redirect_loop"
     INVALID_REDIRECT = "invalid_redirect"
+    CROSS_ORIGIN_CREDENTIAL_REDIRECT = "cross_origin_credential_redirect"
 
 
 class TransportError(RuntimeError):
@@ -248,6 +249,17 @@ def _unique_location(headers: Collection[tuple[bytes, bytes]]) -> bytes | None:
     return locations[0]
 
 
+def _credential_request_headers(
+    headers: Collection[tuple[bytes, bytes]],
+    credentials: OriginBoundCredentials,
+) -> tuple[tuple[bytes, bytes], ...]:
+    """Merge caller headers with origin-bound credentials, rejecting overlap."""
+    for name, _value in headers:
+        if name.lower() in _CREDENTIAL_HEADER_ALLOWLIST:
+            raise ValueError("Caller headers overlap the credential header bag.")
+    return tuple(headers) + credentials.headers
+
+
 async def request_with_redirects(
     target: TargetUrl,
     *,
@@ -258,10 +270,19 @@ async def request_with_redirects(
     max_redirects: int,
     method: str = "GET",
     headers: Collection[tuple[bytes, bytes]] = (),
+    credentials: OriginBoundCredentials | None = None,
 ) -> TransportResponse:
     """Send an HTTP request and follow in-scope redirects under hop and loop limits."""
     if max_redirects < 0:
         raise ValueError("max_redirects must be non-negative")
+
+    hop_headers: Collection[tuple[bytes, bytes]] = headers
+    if credentials is not None:
+        if target.origin != credentials.origin:
+            raise ValueError(
+                "The initial request origin differs from the bound origin."
+            )
+        hop_headers = _credential_request_headers(headers, credentials)
 
     current = target
     visited: set[str] = set()
@@ -288,7 +309,7 @@ async def request_with_redirects(
             current,
             pinned_ip,
             method=method,
-            headers=headers,
+            headers=hop_headers,
             limits=limits,
         )
 
@@ -317,6 +338,12 @@ async def request_with_redirects(
             raise TransportError(
                 TransportErrorCode.REDIRECT_LOOP,
                 "Redirect loop detected.",
+            )
+
+        if credentials is not None and next_target.origin != credentials.origin:
+            raise TransportError(
+                TransportErrorCode.CROSS_ORIGIN_CREDENTIAL_REDIRECT,
+                "The redirect destination origin differs from the bound origin.",
             )
 
         redirects_followed += 1
