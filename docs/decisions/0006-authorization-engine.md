@@ -439,7 +439,8 @@ Pairing invariants:
 - `baseline_identity != comparison_identity`;
 - both `requested_target` values equal `target`;
 - `comparison` equals `compare_response_evidence` of the two projections;
-- `kind` matches the four flags.
+- `kind` matches the four flags: `EQUIVALENT_PROJECTION` when all four
+  `ResponseComparison` flags are true, otherwise `DISTINCT_PROJECTION`.
 
 A violation is a programming defect and raises `ValueError` without echoing
 response content or credentials.
@@ -449,37 +450,67 @@ that changes what the observation means must version the ID.
 
 ## Evidence identity
 
-`AuthorizationObservation.fingerprint` is a computed property: lowercase
-hexadecimal SHA-256 over canonical JSON, using the same canonicalization as
-`PassiveFinding.fingerprint` and `FindingEvidence.evidence_id` (`sort_keys`,
-`ensure_ascii`, compact separators, UTF-8).
+`AuthorizationObservation.fingerprint` is a computed property: the lowercase
+hexadecimal SHA-256 digest of one UTF-8 canonical JSON object. Canonicalization
+matches `PassiveFinding.fingerprint` and `FindingEvidence.evidence_id`:
+
+- `sort_keys=True`
+- `ensure_ascii=True`
+- `separators=(",", ":")`
 
 The pair is ordered and directional. Baseline is first; comparison is second.
 `user-a` as baseline against `user-b` is a different observation from `user-b`
 as baseline against `user-a`, even when both captured projections are equal.
-The engine does not sort, canonicalize or commute the two identities.
+The engine does not sort, canonicalize or commute the two identities. The
+`baseline_identity` and `comparison_identity` keys are distinct, so
+`sort_keys=True` never swaps the ordered pair.
 
-Material, in this meaning if not this key order (canonical JSON applies
-`sort_keys=True`):
+The fingerprint object has exactly this schema. Values are taken from the
+named fields; `schema` is the integer `1`, not the string `"1"`:
 
-1. identity schema version `1`;
-2. `rule_id`;
-3. `target.url`;
-4. `baseline_identity.identity_id`;
-5. `comparison_identity.identity_id`;
-6. baseline projection: `status`, `body_length`, `body_sha256`,
-   `final_target.url`;
-7. comparison projection: `status`, `body_length`, `body_sha256`,
-   `final_target.url`.
+```json
+{
+  "schema": 1,
+  "rule_id": <rule_id>,
+  "target": <target.url>,
+  "baseline_identity": <baseline_identity.identity_id>,
+  "comparison_identity": <comparison_identity.identity_id>,
+  "baseline_response": {
+    "status": <status>,
+    "body_length": <body_length>,
+    "body_sha256": <body_sha256>,
+    "final_target": <final_target.url>
+  },
+  "comparison_response": {
+    "status": <status>,
+    "body_length": <body_length>,
+    "body_sha256": <body_sha256>,
+    "final_target": <final_target.url>
+  }
+}
+```
 
-The four booleans are omitted because they are determined by those fields.
-`requested_target` is the case target already present as `target.url`.
+Nested `status` and `body_length` values are JSON numbers. Nested
+`body_sha256` and `final_target` values are JSON strings. Top-level
+`rule_id`, `target`, `baseline_identity` and `comparison_identity` are JSON
+strings. Because `sort_keys=True`, the schema above is the object shape, not
+the serialized byte order. Top-level keys serialize lexicographically as `baseline_identity`,
+`baseline_response`, `comparison_identity`, `comparison_response`, `rule_id`,
+`schema`, `target`. Each nested projection serializes as `body_length`,
+`body_sha256`, `final_target`, `status`.
 
-The material contains only deterministic non-secret facts. Excluded:
+The schema excludes:
 
+- `requested_target` on either projection; it is pairing provenance and is
+  already present as the case `target.url` when the pairing invariant holds;
+- `kind`; it is determined by the two projections;
+- the four `ResponseComparison` booleans (`status_equal`, `body_length_equal`,
+  `body_sha256_equal`, `final_target_equal`); they are derivable from the two
+  projections;
+- `observation` and `rationale` prose;
 - credentials, header names, header values, body bytes and body excerpts;
-- observation text and rationale;
-- timestamps, UUIDs, `hash()`, randomness, environment and process state.
+- UUIDs, timestamps, `hash()`, randomness, environment, process state and
+  object identity.
 
 Identity is stable for the same ordered inputs in any process. It changes
 when any of the following changes:
@@ -490,7 +521,8 @@ when any of the following changes:
 - either response projection (`status`, `body_length`, `body_sha256` or
   `final_target.url`).
 
-It does not change when only observation wording or rationale changes.
+It does not change when only observation wording, rationale or `kind` changes
+while the two projections remain unchanged.
 
 ## Baseline strategy
 

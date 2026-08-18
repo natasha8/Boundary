@@ -322,26 +322,60 @@ To deliver:
 
 - `AuthorizationObservationKind`;
 - frozen, slotted `AuthorizationObservation`;
-- pairing invariants and `fingerprint` over canonical JSON;
+- pairing invariants and `fingerprint` over the locked canonical JSON schema
+  in ADR 0006;
 - documented caller-side loop that emits one observation for a completed
   pair and none when a request fails.
 
 Acceptance criteria:
 
 - a completed pair always yields exactly one observation;
-- all four flags true => `EQUIVALENT_PROJECTION`; otherwise
+- supplied `kind` must match the four flags: all four
+  `ResponseComparison` flags true => `EQUIVALENT_PROJECTION`; otherwise
   `DISTINCT_PROJECTION`;
 - observation/rationale state facts and explicitly deny that equality is
   proof of IDOR/BOLA or that inequality proves correct access control;
-- `fingerprint` is 64 lowercase hex, locked by an exact canonical-JSON
-  vector, contains only deterministic non-secret material, and excludes
-  credentials, bodies, headers, timestamps, UUIDs, `hash()` and randomness;
+- `fingerprint` is 64 lowercase hex, the SHA-256 digest of UTF-8 canonical
+  JSON with `sort_keys=True`, `ensure_ascii=True` and `separators=(",", ":")`,
+  over exactly this schema (`schema` is the integer `1`):
+
+  ```json
+  {
+    "schema": 1,
+    "rule_id": <rule_id>,
+    "target": <target.url>,
+    "baseline_identity": <baseline_identity.identity_id>,
+    "comparison_identity": <comparison_identity.identity_id>,
+    "baseline_response": {
+      "status": <status>,
+      "body_length": <body_length>,
+      "body_sha256": <body_sha256>,
+      "final_target": <final_target.url>
+    },
+    "comparison_response": {
+      "status": <status>,
+      "body_length": <body_length>,
+      "body_sha256": <body_sha256>,
+      "final_target": <final_target.url>
+    }
+  }
+  ```
+
+  Nested `status` and `body_length` are JSON numbers; nested `body_sha256`
+  and `final_target` are JSON strings. Top-level `rule_id`, `target`,
+  `baseline_identity` and `comparison_identity` are JSON strings.
+  `sort_keys=True` makes the block above the object shape, not the
+  serialized byte order. The ordered
+  baseline/comparison identity pair is preserved by distinct keys, not by
+  object insertion order. The schema excludes `requested_target`, `kind`,
+  the four `ResponseComparison` booleans, `observation`/`rationale` prose,
+  credentials, secrets, UUIDs, time, randomness and object identity;
 - the pair is ordered: swapping baseline and comparison identities yields a
   different `fingerprint` even when both projections are unchanged;
 - identity changes when either ordered identity id, the case target, or
   either response projection (`status`, `body_length`, `body_sha256`,
   `final_target.url`) changes, and does not change when only observation
-  wording changes;
+  wording, rationale or `kind` changes;
 - a transport, scope or request failure on either identity propagates
   unchanged, produces no `AuthorizationObservation`, and is never rewritten
   as `DISTINCT_PROJECTION` or any other benign observation;
