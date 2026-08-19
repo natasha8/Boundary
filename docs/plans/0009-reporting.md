@@ -193,7 +193,7 @@ Tests: `tests/test_reporting_target.py`
 
 Deliver:
 
-- `QUERY_REDACTION_MARKER = "REDACTED"` (exact seven ASCII characters)
+- `QUERY_REDACTION_MARKER = "REDACTED"` (exact eight ASCII characters)
 - frozen, slotted `ReportUrl` with exactly one field, `url: str`
 - constructor `ReportUrl(url: str)` / `ReportUrl(url=...)`; no defaults;
   not keyword-only

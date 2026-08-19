@@ -143,7 +143,7 @@ class ReportUrl:
 QUERY_REDACTION_MARKER: str = "REDACTED"
 ```
 
-Exact value: the seven ASCII characters `REDACTED`. Not `[redacted]`,
+Exact value: the eight ASCII characters `REDACTED`. Not `[redacted]`,
 not `***`, not percent-encoded, not a `key=value` pair.
 
 ### `__post_init__` invariants
