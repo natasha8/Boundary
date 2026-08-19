@@ -1,11 +1,12 @@
 # Reporting Plan
 
-- Status: Planned
+- Status: Completed
 - Milestone: 8
 - Planned: 2026-08-19
+- Completed: 2026-08-19
 - Implementation: `src/boundary/reporting.py`, with a thin `--format`
   adapter in `src/boundary/cli.py` only in Slice E
-- Tests: `tests/test_reporting_target.py`,
+- Tests: `tests/test_reporting_url.py`,
   `tests/test_reporting_model.py`, `tests/test_reporting_json.py`,
   `tests/test_reporting_sarif.py`, plus CLI updates in Slice E
 - Decision record: `docs/decisions/0008-reporting.md`
@@ -15,27 +16,25 @@
 Reporting turns an existing passive `ScanResult` into a deterministic,
 query-safe document.
 
-It makes two statements possible that the repository cannot make today:
+It makes two statements possible that the repository could not make before
+this milestone:
 
 - this seed target, after fail-closed query redaction, produced this
   ordered list of allowlisted findings;
 - those findings can be written as canonical JSON or as valid SARIF 2.1.0
   without serializing domain dataclasses or raw `TargetUrl.url`.
 
-The composition is:
+The final reporting flow is:
 
-    ScanConfig.target + ScanResult
-        -> project_report_target
+    ScanResult
+        -> build_scan_report
+        -> safe ReportUrl projection
         -> ScanReport
-        -> render_scan_report_json
-           / render_scan_report_sarif
+        -> JSON or SARIF renderer
 
 Reporting does not own scope, transport, discovery, passive rules,
 evidence hashing, authorization comparison, persistence or scan
 orchestration. It performs no network activity.
-
-This document is the implementation plan. Milestone 8 documentation does
-not add production code, tests or dependencies.
 
 ## Prerequisites
 
@@ -60,16 +59,16 @@ hashes `target.url`. Headers and body bytes are not stored.
 The completed Scan Orchestration provides `ScanConfig`, `ScanResult` and
 `run_passive_scan`. `ScanResult` is only
 `findings: tuple[FindingEvidence, ...]`. Clean scans are
-`ScanResult(findings=())` with no seed field. `boundary scan` prints
-`{n} findings` and has no report flags.
+`ScanResult(findings=())` with no seed field. Before this milestone,
+`boundary scan` printed `{n} findings` and had no report flags.
 
 Authorization Engine exists and is **not** an input of this milestone.
 
 ADR 0005, 0006 and 0007 left query-string export unresolved. This
 milestone is that decision. Exact constructors, sources and renderer
-shapes are locked in ADR 0008.
+shapes remain locked in ADR 0008.
 
-## Planned architecture
+## Delivered architecture
 
 ```python
 QUERY_REDACTION_MARKER = "REDACTED"
@@ -124,11 +123,24 @@ def render_scan_report_json(report: ScanReport) -> str: ...
 def render_scan_report_sarif(report: ScanReport) -> str: ...
 ```
 
-The module exposes exactly those names. Runtime imports stay in the
-standard library plus the BOUNDARY types it reads (`TargetUrl`,
-`ScanResult`, `FindingEvidence`, `PassiveFindingKind`). It does not
-import `authorization`, `discovery`, `transport` request functions, or
-`resolver`.
+The delivered public surface is:
+
+- `QUERY_REDACTION_MARKER`
+- `REPORT_SCHEMA_VERSION`
+- `ReportUrl`
+- `ReportFinding`
+- `ScanReport`
+- `project_report_target`
+- `build_scan_report`
+- `render_scan_report_json`
+- `render_scan_report_sarif`
+- `boundary scan --format {text,json,sarif}`
+
+`reporting.py` exposes exactly the names above except the CLI flag.
+Runtime imports stay in the standard library plus the BOUNDARY types it
+reads (`TargetUrl`, `ScanResult`, `FindingEvidence`, `PassiveFindingKind`).
+It does not import `authorization`, `discovery`, `transport` request
+functions, or `resolver`.
 
 `scan.py`, `passive.py`, `evidence.py` and `scope.py` are not modified.
 `scan.py` does not import `reporting.py`.
@@ -176,22 +188,28 @@ into a URI.
 
 ## Delivery slices
 
-Tests are written before the implementation of each slice. A slice is
+Tests were written before the implementation of each slice. A slice is
 complete only when its acceptance criteria hold.
 
-Proposed sequence: **A, B, C, D, E**.
+Completed sequence: **A, B, C, D, E**.
+
+- Slice A: safe `ReportUrl` projection
+- Slice B: `ScanReport` / `ReportFinding` projection
+- Slice C: deterministic JSON renderer
+- Slice D: deterministic SARIF 2.1.0 renderer
+- Slice E: CLI `--format {text,json,sarif}`
 
 Slices A–D are the reporting architecture. Slice E is the minimal CLI
 adapter, justified because the product brief lists JSON report output and
 ADR 0007 assigned serializers to M8. Without E, operators have no
-supported way to emit the projection from `boundary scan`. E stays last
+supported way to emit the projection from `boundary scan`. E stayed last
 and remains a thin argparse/`print` adapter.
 
-### Slice A: Safe URL / report target projection
+### Slice A: Safe URL / report target projection — completed
 
-Tests: `tests/test_reporting_target.py`
+Tests: `tests/test_reporting_url.py`
 
-Deliver:
+Delivered:
 
 - `QUERY_REDACTION_MARKER = "REDACTED"` (exact eight ASCII characters)
 - frozen, slotted `ReportUrl` with exactly one field, `url: str`
@@ -199,14 +217,14 @@ Deliver:
   not keyword-only
 - no `TargetUrl` field; no custom `__str__` / `__repr__`
 - `project_report_target` implementing the ADR algorithm with
-  `urlunsplit`; **do not read `TargetUrl.url`**
+  `urlunsplit`; **does not read `TargetUrl.url`**
 
 `ReportUrl.__post_init__` raises `ValueError` on `url == ""`, `"#" in url`,
 or a `?` whose remainder is not exactly `REDACTED`.
 
 Query presence is `target.query != ""`.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `ReportUrl` is frozen and slotted; no `__dict__`; fields are exactly
   `("url",)`;
@@ -236,16 +254,16 @@ Acceptance criteria:
   raises `ValueError` and does not emit a URL;
 - the function does not mutate the input `TargetUrl` and does not store
   it on `ReportUrl`;
-- renderers-to-be must use `.url`; tests may show `str(ReportUrl(...))`
+- renderers must use `.url`; tests may show `str(ReportUrl(...))`
   is not equal to `.url` (no custom `__str__`);
 - error messages do not include `target.query` or `target.url`;
 - no DNS, sockets or HTTP.
 
-### Slice B: Safe report models + `build_scan_report`
+### Slice B: Safe report models + `build_scan_report` — completed
 
 Tests: `tests/test_reporting_model.py`
 
-Deliver:
+Delivered:
 
 - `ReportFinding`, `ScanReport`, `REPORT_SCHEMA_VERSION = 1` (`int`)
 - `build_scan_report(*, target, result) -> ScanReport`
@@ -271,7 +289,7 @@ Do not interpolate URLs into `observation` / `rationale`.
 evidence tuples, and non-str observation/rationale. Shape failures raise
 `ValueError` for the whole build; no row is omitted.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - `ScanReport` / `ReportFinding` are frozen and slotted; field names and
   order match the ADR;
@@ -284,8 +302,7 @@ Acceptance criteria:
 - `kind` is the `PassiveFindingKind` member from the finding, not a bare
   string; a bare `"hardening"` or any other object raises `ValueError`;
 - evidence is the same `tuple[tuple[str, str], ...]` in stored order;
-  JSON is not built yet, but a `list`/`dict`/`bytes` evidence value raises
-  `ValueError`;
+  a `list`/`dict`/`bytes` evidence value raises `ValueError`;
 - `status` is `record.response.status` (`int`), not the evidence-key
   string;
 - `requested_target` is present even when its `.url` equals `target.url`;
@@ -302,13 +319,13 @@ Acceptance criteria:
 - `boundary.reporting` does not import `boundary.authorization`;
 - `boundary.scan` still does not import `boundary.reporting`;
 - domain modules are unchanged;
-- public surface after this slice is A plus B (no renderers required yet).
+- public surface after this slice is A plus B (renderers added in C and D).
 
-### Slice C: Deterministic JSON renderer
+### Slice C: Deterministic JSON renderer — completed
 
 Tests: `tests/test_reporting_json.py`
 
-Deliver:
+Delivered:
 
 - `render_scan_report_json(report: ScanReport) -> str`
 
@@ -324,7 +341,7 @@ No `indent`, no `default=`, no trailing newline.
 Lock at least two golden strings: the ADR empty report, and one finding
 whose seed/finding URLs had a query.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - empty report golden string is exactly
   `{"schema":1,"target":"https://example.com/","findings":[]}`
@@ -349,18 +366,18 @@ Acceptance criteria:
   document;
 - no partial JSON on failure.
 
-### Slice D: SARIF 2.1.0 renderer
+### Slice D: SARIF 2.1.0 renderer — completed
 
 Tests: `tests/test_reporting_sarif.py`
 
-Deliver:
+Delivered:
 
 - `render_scan_report_sarif(report: ScanReport) -> str`
 
 Same JSON encoding rules as Slice C. Exact document shape is ADR 0008
 (top-level keys, one run, driver, rules, results, locations, properties).
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - empty report for seed `https://example.com/` is exactly the ADR golden
   SARIF string (`$schema` included, `version` `"2.1.0"`, one run,
@@ -394,18 +411,17 @@ Acceptance criteria:
 - no GitHub upload, no network fetch of the `$schema` URI;
 - no trailing newline; repeated calls match.
 
-Do not add a GitHub-compatibility test that expects file annotations.
-Add a negative test that the renderer does **not** emit a dummy repo path
-for HTTP findings.
+The renderer does **not** emit a dummy repo path for HTTP findings. GitHub
+Code Scanning file-annotation compatibility is not claimed.
 
-### Slice E: Minimal CLI output wiring
+### Slice E: Minimal CLI output wiring — completed
 
 Tests: extend `tests/test_cli_scan.py` (keep no-argument help coverage)
 
 Justified: library renderers alone cannot satisfy the product-brief JSON
 output from `boundary scan`. The adapter is argparse plus `print`.
 
-Deliver:
+Delivered:
 
 - `--format` with choices `text`, `json`, `sarif`;
 - default `text` → existing `{n} findings`;
@@ -414,7 +430,7 @@ Deliver:
   matching renderer, printed to stdout;
 - no `--output`, no file API, no pretty flag, no upload.
 
-Acceptance criteria:
+Acceptance criteria met:
 
 - omitted `--format` still prints exactly `{n} findings`;
 - `--format json` stdout is the canonical JSON plus the single newline
@@ -468,25 +484,43 @@ query redaction separately so the residual risk stays visible.
 
 ## Final security invariants
 
+- raw `TargetUrl.url` is never serialized directly;
 - `TargetUrl.url` is not a reporting input;
-- every non-empty query becomes `?REDACTED`; empty query adds no `?`;
+- every non-empty query is replaced by `?REDACTED`; empty query adds no
+  `?`;
 - `ReportUrl` v1 is query redaction, not universal URL-secret redaction;
-- `fingerprint` and `evidence_id` never appear in a report;
+- domain `fingerprint` and `evidence_id` remain excluded from reports;
 - headers, bodies, credentials and `ScanConfig` never appear in a report;
+- no generic serializer (`dataclasses.asdict`, `__dict__`,
+  `json.dumps(default=...)`) is used on domain objects or `ScanReport`;
 - evidence crossing the boundary is `tuple[tuple[str, str], ...]` only;
 - observation/rationale are copied, never interpolated by reporting;
 - JSON/SARIF serialize `ScanReport` only;
 - SARIF HTTP locations are safe `ReportUrl.url` values, not fabricated
-  files;
+  GitHub-specific source paths;
 - GitHub Code Scanning compatibility is not claimed;
-- authorization observations are not mapped;
+- authorization reporting remains separate; authorization observations
+  are not mapped;
 - reporting performs no I/O;
 - the application remains a modular monolith with one new internal
   module.
 
+## Residual risks
+
+`ReportUrl` v1 guarantees query redaction, not universal URL-secret
+redaction. These remain documented residual risks, not defects in the
+Milestone 8 architecture:
+
+- path tokens are not redacted;
+- `body_sha256` is not a confidentiality mechanism;
+- safe projection can collapse findings that differ only by query
+  (distinct `ScanResult` rows remain distinct report rows);
+- future evidence/prose must continue satisfying the reporting-safe
+  contract.
+
 ## Milestone non-goals
 
-Not added:
+Not added, and still deferred:
 
 - GitHub upload / API / Actions integration;
 - GitHub-specific source-location fabrication;
@@ -507,15 +541,14 @@ Not added:
 
 ## Dependency decision
 
-No dependency will be added.
+No dependency was added.
 
 stdlib `json`, `dataclasses` and `urllib.parse.urlunsplit` are
 sufficient. SARIF is emitted as JSON text, not via a SARIF SDK.
 
 ## Verification sequence
 
-This documentation milestone runs the existing repository gates without
-new production tests:
+Repository checks executed at closeout:
 
 ```text
 uv run ruff format --check .
@@ -525,15 +558,31 @@ uv run pytest
 git diff --check
 ```
 
-Implementation closeout of Slices A–E will re-run the same sequence,
-focused tests first, then the complete suite. No test may contact a
-public target, skip a security assertion or weaken an existing check.
+CLI focused (`tests/test_cli.py`, `tests/test_cli_scan.py`): 82 passed.
+Full repository suite: 1521 passed.
+ruff: clean.
+mypy: clean.
+`git diff --check`: clean.
 
-## Unresolved boundaries after M8
+Focused CLI tests ran first, then the complete suite. No test contacted a
+public target, skipped a security assertion or weakened an existing check.
 
-These remain deferred and are not defects in the architecture:
+## Test coverage
+
+CLI focused (`tests/test_cli.py`, `tests/test_cli_scan.py`): 82 passed.
+
+Full repository suite at closeout: 1521 tests collected and passing, with
+no skipped tests.
+
+## Unresolved boundaries
+
+These remain deferred residual risks and product non-goals. They are not
+defects in the Milestone 8 architecture. This closeout does not specify a
+later milestone design:
 
 - path-segment tokens;
+- `body_sha256` as a digest, not redaction of body secrets;
+- safe-URL collapse of findings that differed only in query content;
 - a later `report_id` derived only from the safe projection;
 - GitHub Code Scanning mapping without fabricated files;
 - authorization reporting;
@@ -541,20 +590,18 @@ These remain deferred and are not defects in the architecture:
 
 ## Definition of done
 
-Documentation milestone (this change):
+Met:
 
-- ADR 0008 and this plan exist and agree on constructors, sources,
-  evidence shape, builder checks, JSON mapping and SARIF shape;
-- no production code, tests or dependencies were added;
-- quality gates on the existing tree pass.
-
-Implementation milestone (later slices):
-
-- Slices A–D meet every acceptance criterion;
-- Slice E meets its criteria or remains explicitly absent only if a
-  later decision withdraws CLI wiring;
-- public surface matches the ADR;
+- Slices A–E meet every acceptance criterion;
+- the delivered public surface is `QUERY_REDACTION_MARKER`,
+  `REPORT_SCHEMA_VERSION`, `ReportUrl`, `ReportFinding`, `ScanReport`,
+  `project_report_target`, `build_scan_report`,
+  `render_scan_report_json`, `render_scan_report_sarif`, and
+  `boundary scan --format {text,json,sarif}`;
 - domain models are unchanged;
 - formatting, linting, typing and all tests pass without skipped or
   weakened tests;
-- no secret-bearing query, header or body appears in report output.
+- ADR 0008 and this plan match the implementation, including deferred
+  items;
+- no secret-bearing query, header or body appears in report output;
+- no dependency was added.
