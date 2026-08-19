@@ -85,6 +85,15 @@ _LOCAL_LAB_IPV6_NETWORKS = (
     IPv6Network("fc00::/7"),
 )
 
+_NON_LAB_SPECIAL_USE_IPV6_NETWORKS = (
+    IPv6Network("64:ff9b::/96"),
+    IPv6Network("::ffff:0:0:0/96"),
+    IPv6Network("::/96"),
+    IPv6Network("fec0::/10"),
+    IPv6Network("2001:20::/28"),
+    IPv6Network("5f00::/16"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Origin:
@@ -348,6 +357,15 @@ def _is_address_allowed(
 ) -> bool:
     if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
         return _is_address_allowed(address.ipv4_mapped, policy)
+
+    if policy is AddressPolicy.LOCAL_LAB and isinstance(address, IPv6Address):
+        if any(address in network for network in _LOCAL_LAB_IPV6_NETWORKS):
+            return True
+
+    if isinstance(address, IPv6Address) and any(
+        address in network for network in _NON_LAB_SPECIAL_USE_IPV6_NETWORKS
+    ):
+        return False
 
     if address.is_global and not address.is_multicast:
         return True
