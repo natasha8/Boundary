@@ -3,6 +3,11 @@ from argparse import ArgumentParser, Namespace
 from collections.abc import Sequence
 
 from boundary.discovery import DiscoveryLimits
+from boundary.reporting import (
+    build_scan_report,
+    render_scan_report_json,
+    render_scan_report_sarif,
+)
 from boundary.resolver import SystemAddressResolver
 from boundary.scan import ScanConfig, run_passive_scan
 from boundary.scope import AddressPolicy, parse_target_url
@@ -31,6 +36,12 @@ def build_parser() -> ArgumentParser:
     scan_parser.add_argument("--read-timeout", type=float)
     scan_parser.add_argument("--write-timeout", type=float)
     scan_parser.add_argument("--pool-timeout", type=float)
+    scan_parser.add_argument(
+        "--format",
+        dest="format",
+        choices=["text", "json", "sarif"],
+        default="text",
+    )
     return parser
 
 
@@ -58,7 +69,20 @@ def _run_scan(args: Namespace) -> None:
         discovery_limits=discovery_limits,
     )
     result = asyncio.run(run_passive_scan(config))
-    print(f"{len(result.findings)} findings")
+    if args.format == "text":
+        print(f"{len(result.findings)} findings")
+    elif args.format == "json":
+        report = build_scan_report(
+            target=config.target,
+            result=result,
+        )
+        print(render_scan_report_json(report))
+    elif args.format == "sarif":
+        report = build_scan_report(
+            target=config.target,
+            result=result,
+        )
+        print(render_scan_report_sarif(report))
 
 
 def main(argv: Sequence[str] | None = None) -> None:
