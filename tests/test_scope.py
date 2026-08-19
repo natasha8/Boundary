@@ -388,6 +388,26 @@ def test_require_allowed_address_rejects_non_public_addresses(
 @pytest.mark.parametrize(
     "address",
     [
+        "64:ff9b::7f00:1",
+        "::ffff:0:7f00:1",
+        "::7f00:1",
+        "fec0::1",
+        "2001:20::1",
+        "5f00::1",
+    ],
+)
+def test_require_allowed_address_rejects_special_use_ipv6_under_public(
+    address: str,
+) -> None:
+    with pytest.raises(ScopeValidationError) as error:
+        require_allowed_address(address, AddressPolicy.PUBLIC)
+
+    assert error.value.code is ScopeErrorCode.ADDRESS_NOT_ALLOWED
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
         "127.0.0.1",
         "10.0.0.1",
         "172.16.0.1",
