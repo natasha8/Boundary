@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from urllib.parse import urlunsplit
 
@@ -135,4 +136,35 @@ def build_scan_report(*, target: TargetUrl, result: ScanResult) -> ScanReport:
         schema=REPORT_SCHEMA_VERSION,
         target=projected_seed,
         findings=findings,
+    )
+
+
+def render_scan_report_json(report: ScanReport) -> str:
+    """Render ScanReport as compact deterministic JSON."""
+    if report.schema != REPORT_SCHEMA_VERSION:
+        raise ValueError("schema must equal REPORT_SCHEMA_VERSION")
+    payload = {
+        "schema": report.schema,
+        "target": report.target.url,
+        "findings": [
+            {
+                "rule_id": finding.rule_id,
+                "kind": finding.kind.value,
+                "target": finding.target.url,
+                "requested_target": finding.requested_target.url,
+                "observation": finding.observation,
+                "rationale": finding.rationale,
+                "evidence": [[key, value] for key, value in finding.evidence],
+                "status": finding.status,
+                "body_length": finding.body_length,
+                "body_sha256": finding.body_sha256,
+            }
+            for finding in report.findings
+        ],
+    }
+    return json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=False,
     )
