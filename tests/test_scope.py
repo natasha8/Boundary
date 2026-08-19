@@ -127,6 +127,15 @@ class FakeAddressResolver:
             "x=%2e%2e",
             "https://example.com/a%2fb/../etc?x=%2e%2e",
         ),
+        (
+            "https://example.com/caf%C3%A9?q=caf%C3%A9",
+            "https",
+            "example.com",
+            443,
+            "/caf%C3%A9",
+            "q=caf%C3%A9",
+            "https://example.com/caf%C3%A9?q=caf%C3%A9",
+        ),
     ],
 )
 def test_parse_target_url_normalizes_valid_urls(
@@ -174,6 +183,10 @@ def test_parse_target_url_normalizes_valid_urls(
             "https://exämple.com/",
             UrlErrorCode.NON_ASCII_HOST,
         ),
+        (
+            "https://exämple.com/café",
+            UrlErrorCode.NON_ASCII_HOST,
+        ),
         ("https://example..com/", UrlErrorCode.INVALID_HOST),
         ("https://.example.com/", UrlErrorCode.INVALID_HOST),
         ("https://example%2ecom/", UrlErrorCode.INVALID_HOST),
@@ -189,6 +202,32 @@ def test_parse_target_url_rejects_unsafe_input(
         parse_target_url(raw)
 
     assert error.value.code is expected_code
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_code"),
+    [
+        ("https://example.com/café", UrlErrorCode.UNSAFE_CHARACTER),
+        ("https://example.com/?q=café", UrlErrorCode.UNSAFE_CHARACTER),
+        ("https://example.com/café?q=café", UrlErrorCode.UNSAFE_CHARACTER),
+        (
+            "https://example.com/café?token=secret-query-token",
+            UrlErrorCode.UNSAFE_CHARACTER,
+        ),
+    ],
+)
+def test_parse_target_url_rejects_non_ascii_path_and_query(
+    raw: str,
+    expected_code: UrlErrorCode,
+) -> None:
+    with pytest.raises(UrlValidationError) as error:
+        parse_target_url(raw)
+
+    assert error.value.code is expected_code
+    message = str(error.value)
+    assert raw not in message
+    assert "token=" not in message
+    assert "secret-query-token" not in message
 
 
 def test_origin_is_immutable_and_hashable() -> None:
