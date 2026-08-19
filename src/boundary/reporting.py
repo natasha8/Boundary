@@ -168,3 +168,80 @@ def render_scan_report_json(report: ScanReport) -> str:
         separators=(",", ":"),
         sort_keys=False,
     )
+
+
+_SARIF_SCHEMA_URI = (
+    "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/"
+    "schemas/sarif-schema-2.1.0.json"
+)
+
+
+def _collect_sarif_rules(
+    findings: tuple[ReportFinding, ...],
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Build first-seen rule descriptors and a stable rule_id -> ruleIndex map."""
+    descriptors: list[dict[str, str]] = []
+    indexes: dict[str, int] = {}
+    kinds: dict[str, PassiveFindingKind] = {}
+    for finding in findings:
+        rule_id = finding.rule_id
+        if rule_id not in indexes:
+            indexes[rule_id] = len(descriptors)
+            kinds[rule_id] = finding.kind
+            descriptors.append({"id": rule_id, "name": rule_id})
+        elif kinds[rule_id] is not finding.kind:
+            raise ValueError("rule_id kind must match the first-seen kind")
+    return descriptors, indexes
+
+
+def render_scan_report_sarif(report: ScanReport) -> str:
+    """Render ScanReport as compact deterministic SARIF 2.1.0."""
+    if report.schema != REPORT_SCHEMA_VERSION:
+        raise ValueError("schema must equal REPORT_SCHEMA_VERSION")
+    rules, rule_indexes = _collect_sarif_rules(report.findings)
+    results: list[dict[str, object]] = []
+    for finding in report.findings:
+        result: dict[str, object] = {
+            "ruleId": finding.rule_id,
+            "ruleIndex": rule_indexes[finding.rule_id],
+            "level": "note",
+            "message": {"text": finding.observation},
+            "locations": [
+                {"physicalLocation": {"artifactLocation": {"uri": finding.target.url}}}
+            ],
+        }
+        if finding.requested_target != finding.target:
+            result["relatedLocations"] = [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": finding.requested_target.url}
+                    },
+                    "message": {"text": "requested target"},
+                }
+            ]
+        result["properties"] = {
+            "kind": finding.kind.value,
+            "rationale": finding.rationale,
+            "evidence": [[key, value] for key, value in finding.evidence],
+            "status": finding.status,
+            "body_length": finding.body_length,
+            "body_sha256": finding.body_sha256,
+        }
+        results.append(result)
+    payload = {
+        "$schema": _SARIF_SCHEMA_URI,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"name": "BOUNDARY", "rules": rules}},
+                "results": results,
+                "properties": {"scan_target": report.target.url},
+            }
+        ],
+    }
+    return json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=False,
+    )
