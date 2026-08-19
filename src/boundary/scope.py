@@ -176,6 +176,13 @@ def parse_target_url(raw: str) -> TargetUrl:
     host = _extract_host(parsed)
     default_port = _DEFAULT_PORTS[scheme]
     port = _resolve_port(parsed, default_port)
+
+    if not parsed.path.isascii() or not parsed.query.isascii():
+        raise UrlValidationError(
+            UrlErrorCode.UNSAFE_CHARACTER,
+            "Target URL contains unsafe characters.",
+        )
+
     path = parsed.path or "/"
     netloc = _format_netloc(host, port, default_port)
 
