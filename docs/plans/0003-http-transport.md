@@ -47,8 +47,7 @@ Delivered concepts:
 - `PinnedAsyncNetworkBackend`;
 - `request_once` and `request_with_redirects`;
 - `RequestLimits`;
-- `TransportResponse`, `TransportError` and `TransportErrorCode`;
-- `ConnectionReuseKey` and `connection_reuse_key`.
+- `TransportResponse`, `TransportError` and `TransportErrorCode`.
 
 Required request flow:
 
@@ -258,23 +257,20 @@ Slice D will not:
 - each accepted hop preserves Host/SNI from the hop’s `TargetUrl.host`;
 - tests cover success, rejection, hop-limit, and loop cases offline.
 
-### Slice E: Connection reuse identity and policy — completed
+### Slice E: Connection reuse identity and policy — deferred, not shipped
 
-Slice E defines the identity under which a connection could ever be shared. It
-delivers reuse identity and policy only; it does not deliver persistent
-pooling.
+Slice E considered the identity under which a connection could ever be shared.
+It did not deliver persistent pooling, and no reuse-key production surface was
+retained.
 
-Behavior:
+Live behavior remains isolated:
 
-- `ConnectionReuseKey` fixes reuse identity as
-  `(scheme, host, port, pinned_ip)`;
-- `connection_reuse_key` builds the key from a normalized `TargetUrl` and a
-  prevalidated pinned IP, canonicalizing the pinned value through
-  `ipaddress.ip_address()` and rejecting non-IP values;
-- a different scheme, host, port, or pinned IP produces a different key, so
-  cross-origin and changed-pin reuse are excluded by construction;
-- `request_once` stays isolated: one pool per request with
+- `request_once` uses one pool per request with
   `max_keepalive_connections=0` and `retries=0`.
+
+If persistent pooling is ever introduced, a reuse identity would need to
+include scheme, host, port, and pinned IP so that cross-origin and changed-pin
+reuse stay excluded by construction.
 
 #### Slice E non-goals
 
@@ -283,15 +279,15 @@ Slice E did not:
 - implement persistent pooling, keep-alive lifecycle, or a pool cache;
 - share one pinned backend across unrelated origins;
 - add retry, backoff, or circuit-breaker frameworks;
-- add proxies or HTTP/2 multiplexing policy.
+- add proxies or HTTP/2 multiplexing policy;
+- ship a `ConnectionReuseKey` / `connection_reuse_key` runtime surface.
 
 #### Slice E acceptance criteria
 
-- the key contains exactly scheme, host, port and pinned IP, and is immutable;
-- equal normalized origins with the same pinned IP produce equal keys;
-- a different origin, port, scheme, or pinned IP produces a different key;
-- IPv6 pins compare by canonical form and non-IP pins are rejected;
-- tests prove reuse eligibility and refusal without public-Internet contact.
+- persistent pooling remains unimplemented;
+- `request_once` stays isolated: one pool per request with
+  `max_keepalive_connections=0` and `retries=0`;
+- tests prove the isolated request path without public-Internet contact.
 
 ## Deferred: persistent connection pooling
 
@@ -299,8 +295,8 @@ Persistent connection pooling and keep-alive reuse are deferred, not
 implemented.
 
 An HTTPCore pool binds to one network backend, while BOUNDARY's backend is
-pinned to one validated IP. Safe persistent reuse therefore requires lifecycle
-management keyed by `ConnectionReuseKey`. That machinery is not justified until
+pinned to one validated IP. Safe persistent reuse would require lifecycle
+management keyed by origin and pinned IP. That machinery is not justified until
 Discovery/Crawler work demonstrates a concrete performance need.
 
 ## Final security invariants
@@ -322,7 +318,7 @@ Discovery/Crawler work demonstrates a concrete performance need.
 - hop limits, normalized-URL loop detection, duplicate `Location` headers and
   malformed `Location` values all fail closed;
 - `UrlValidationError` and `ScopeValidationError` propagate unchanged;
-- connection reuse can never be selected by hostname or IP alone;
+- connection reuse is not implemented; each request uses an isolated pool;
 - retries stay disabled (`retries=0`);
 - tests run offline: autouse guards fail transport tests immediately on DNS
   resolution or real socket I/O.
@@ -333,8 +329,7 @@ Offline transport tests, all passing:
 
 - `tests/test_pinned_backend.py`: 17 tests;
 - `tests/test_transport_request.py`: 38 tests;
-- `tests/test_transport_redirects.py`: 26 tests;
-- `tests/test_transport_reuse.py`: 15 tests.
+- `tests/test_transport_redirects.py`: 26 tests.
 
 Full suite: 235 tests passing, with no skipped tests.
 
