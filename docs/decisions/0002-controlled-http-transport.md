@@ -129,30 +129,23 @@ When multiple addresses pass policy, transport selects the first address from
 `resolve_allowed_addresses`. Happy Eyeballs and connect-time address fallback
 are out of scope; they would constitute a retry framework.
 
-### Connection reuse identity
+### Connection reuse identity (design-only, deferred)
 
 A single `AsyncConnectionPool` sharing one pinned backend would send every
-origin to the same IP, so hostname-keyed reuse is unsafe. Reuse identity is
-therefore defined by `ConnectionReuseKey`:
+origin to the same IP, so hostname-keyed reuse is unsafe. If persistent pooling
+is ever introduced, reuse identity would have to include scheme, host, port,
+and pinned IP — not hostname or IP alone.
 
-    (scheme, host, port, pinned_ip)
-
-`connection_reuse_key` builds it from a normalized `TargetUrl` and a
-prevalidated pinned IP, canonicalizing the pinned value through
-`ipaddress.ip_address()` so equivalent textual forms (notably IPv6) compare
-equal and non-IP values are rejected.
-
-**Persistent connection pooling and keep-alive reuse are intentionally
-deferred.** Only the identity and the policy it encodes are implemented.
+**Persistent connection pooling and keep-alive reuse were never implemented
+and remain deferred.** No reuse-key type is part of the runtime surface.
 `request_once` remains isolated: one pool per request with
 `max_keepalive_connections=0`, opened and closed around a single request.
 
 Why the deferral: an HTTPCore pool binds to one network backend, while
 BOUNDARY's backend is pinned to one validated IP. Safe persistent reuse
-therefore requires lifecycle management keyed by `ConnectionReuseKey` —
-per-key pools, eviction, and revalidation on pin change. That machinery is not
-justified until Discovery/Crawler work demonstrates a concrete performance
-need.
+would require lifecycle management — per-identity pools, eviction, and
+revalidation on pin change. That machinery is not justified until
+Discovery/Crawler work demonstrates a concrete performance need.
 
 ### Delivered surface
 
@@ -161,8 +154,7 @@ The transport module contains only:
 - `PinnedAsyncNetworkBackend`;
 - `request_once` and `request_with_redirects`;
 - `RequestLimits`, `TransportResponse`, `TransportError` /
-  `TransportErrorCode`;
-- `ConnectionReuseKey` and `connection_reuse_key`.
+  `TransportErrorCode`.
 
 ### Explicitly excluded
 
@@ -217,8 +209,9 @@ Negative:
 
 - BOUNDARY owns redirect hop and loop control, response-size limits, and
   redirect revalidation;
-- connection reuse is keyed by origin and pinned IP, not by hostname alone, and
-  persistent reuse stays unavailable until that lifecycle is built;
+- persistent connection reuse remains deferred, so every request still pays a
+  full connect; a future reuse identity would have to include origin and
+  pinned IP, not hostname alone;
 - every request opens and closes its own connection, so repeated requests to
   one origin pay a full connect (and TLS handshake) each time;
 - `httpcore[asyncio]` is a runtime dependency.
